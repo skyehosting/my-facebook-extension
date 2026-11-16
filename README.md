@@ -122,13 +122,7 @@ You do not need any of this to use the extension. It is here for the curious.
 
 **"My feed" asks Facebook for the right posts to begin with.** Facebook has two feeds of its own that contain only what you want: a Friends feed and a Pages feed. My Facebook asks for both, using the same kind of request the Facebook page itself makes when you scroll, and places their posts into your home page.
 
-```mermaid
-flowchart LR
-    F["Facebook's Friends feed<br>(friends only)"] --> M
-    P["Facebook's Pages feed<br>(accounts you follow)"] --> M
-    M{{"My Facebook<br>drops ads and unfollowed accounts,<br>orders newest first"}} --> H["Your facebook.com home page"]
-    X["Facebook's main mix<br>(ads, suggestions, groups)"] -. "removed before it is drawn" .-> M
-```
+<p align="center"><img src="docs/how-it-works.svg" alt="Diagram: Facebook's Friends feed and Pages feed go into My Facebook, which drops ads and unfollowed accounts and orders posts newest first, then fills your facebook.com home page. Facebook's main mix is removed before it is drawn." width="760"></p>
 
 - **Order:** each feed is newest first, and the two are merged by time. At most three posts from Pages appear in a row, so a Page that posts all day cannot bury your friends.
 - **Nothing jumps:** only the part of the feed that is not on screen yet is changed. Posts you are looking at never move.
