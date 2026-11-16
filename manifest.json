@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "My Facebook - Friends & Following Only",
+  "short_name": "My Facebook",
+  "version": "1.4.0",
+  "description": "Shows only posts and reels from your friends and the people/pages you follow. Hides ads, suggested posts, and everything else.",
+  "homepage_url": "https://github.com/skyehosting/my-facebook-extension",
+  "permissions": ["storage", "alarms"],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "My Facebook",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.facebook.com/*", "https://web.facebook.com/*"],
+      "js": ["src/main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.facebook.com/*", "https://web.facebook.com/*"],
+      "js": ["src/bridge.js"],
+      "css": ["src/style.css"],
+      "run_at": "document_start"
+    }
+  ]
+}

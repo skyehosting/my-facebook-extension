@@ -1,0 +1,122 @@
+/*
+ * My Facebook - Friends & Following Only
+ *
+ * These rules only do anything while src/main.js has put its marker attributes
+ * on <html>, so turning the extension off in the popup restores Facebook as-is.
+ */
+
+/* Home feed: a post stays collapsed and invisible until main.js has approved it,
+   so nothing that is going to be removed is ever painted.
+   Collapsing to zero height (instead of display:none) is deliberate: Facebook
+   renders and loads the next posts only once the previous one has entered the
+   viewport, and an element with display:none never does, which stalls the feed. */
+html[data-ffo-home][data-ffo-strict]:not([data-ffo-debug]) div[aria-posinset]:not([data-ffo="show"]),
+html[data-ffo-home]:not([data-ffo-debug]) div[aria-posinset][data-ffo="hide"] {
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  overflow: hidden !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/* Single cards inside a Reels shelf, right-rail ads, the reels "For you" tab. */
+html[data-ffo-on] [data-ffo-card="hide"],
+html[data-ffo-on] [data-ffo-hidden] {
+  display: none !important;
+}
+
+/* Reel viewer: blank the player while a reel that is not from a friend or a
+   followed account is being skipped. */
+html[data-ffo-reel-block] div[role="main"] {
+  visibility: hidden !important;
+}
+
+/* "Show what is being hidden" mode from the popup. */
+html[data-ffo-home][data-ffo-debug] div[aria-posinset][data-ffo="hide"] {
+  position: relative;
+  max-height: 120px;
+  overflow: hidden;
+  opacity: 0.35;
+  outline: 2px dashed #e0245e;
+  outline-offset: -2px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+html[data-ffo-home][data-ffo-debug] div[aria-posinset][data-ffo="hide"]::before {
+  content: "Hidden by My Facebook: " attr(data-ffo-reason);
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 5;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: #e0245e;
+  color: #fff;
+  font: 600 12px/18px system-ui, sans-serif;
+}
+
+#ffo-notice {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  z-index: 2147483646;
+  transform: translate(-50%, -50%);
+  max-width: min(420px, 80vw);
+  padding: 14px 20px;
+  border-radius: 12px;
+  background: rgba(20, 22, 26, 0.94);
+  color: #fff;
+  font: 500 14px/21px system-ui, sans-serif;
+  text-align: center;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+/* "Update available" notice, bottom-left of facebook.com */
+#ffo-update {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 2147483645;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 420px;
+  padding: 10px 12px 10px 14px;
+  border-radius: 12px;
+  background: rgba(20, 22, 26, 0.95);
+  color: #fff;
+  font: 500 13px/19px system-ui, sans-serif;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+}
+
+#ffo-update button {
+  flex: none;
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: #1b74e4;
+  color: #fff;
+  font: 600 12px/18px system-ui, sans-serif;
+  cursor: pointer;
+}
+
+#ffo-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 2147483647;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(20, 22, 26, 0.92);
+  color: #fff;
+  font: 500 13px/20px system-ui, sans-serif;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}

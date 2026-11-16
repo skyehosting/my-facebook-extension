@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>My Facebook</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="../icons/icon48.png" alt="" width="28" height="28">
+    <div>
+      <h1>My Facebook</h1>
+      <p>Friends &amp; following only</p>
+    </div>
+    <label class="switch" title="Turn the whole extension on or off">
+      <input type="checkbox" id="enabled">
+      <span></span>
+    </label>
+  </header>
+
+  <section id="stats" class="stats" hidden>
+    <div class="big"><b id="hiddenCount">0</b> hidden <span class="sep">/</span> <b id="shownCount">0</b> shown</div>
+    <div id="reasons" class="reasons"></div>
+  </section>
+  <section id="nostats" class="stats muted">Open facebook.com to see what is being removed.</section>
+
+  <section class="reels" id="reels">
+    <h2 id="reelsLabel">Reels from</h2>
+    <div class="seg" role="radiogroup" aria-labelledby="reelsLabel">
+      <button type="button" role="radio" data-mode="friends">Friends</button>
+      <button type="button" role="radio" data-mode="following">Friends + following</button>
+      <button type="button" role="radio" data-mode="all">Everything</button>
+    </div>
+    <p id="reelsHint" class="hint"></p>
+    <div id="friendsRow" class="friends-row" hidden>
+      <span id="friendsInfo"></span>
+      <button type="button" id="syncFriends">Sync</button>
+    </div>
+    <div id="replayRow" class="friends-row quiet" hidden>
+      <span id="replayInfo"></span>
+      <button type="button" id="clearReplay" class="plain">Clear</button>
+    </div>
+  </section>
+
+  <details id="unfollowedBox" class="unfollowed" hidden>
+    <summary><span id="unfollowedTitle"></span></summary>
+    <p class="hint">Unfollowed on Facebook and hidden here. Follow puts them back.</p>
+    <ul id="unfollowedList"></ul>
+    <p id="pendingNote" class="hint" hidden></p>
+  </details>
+
+  <section class="options" id="options">
+    <label><input type="checkbox" id="showGroups"><span><b>Show posts from my groups</b><small>Off: a group post shows only if a friend wrote it</small></span></label>
+    <label><input type="checkbox" id="hideSideAds"><span><b>Hide right-column ads</b><small>The "Sponsored" block beside the feed</small></span></label>
+    <label><input type="checkbox" id="debug"><span><b>Show what is being hidden</b><small>Hidden posts appear dimmed with the reason</small></span></label>
+  </section>
+
+  <section class="updates">
+    <h2>Updates</h2>
+    <div class="friends-row">
+      <span id="updateInfo"></span>
+      <button type="button" id="checkUpdate">Check now</button>
+    </div>
+    <p id="updateHow" class="hint" hidden>
+      To install it, double-click <b>Update My Facebook.bat</b> in the extension folder.
+      <a href="#" id="updateNotes">See what changed</a>
+    </p>
+    <div class="options">
+      <label><input type="checkbox" id="checkUpdates"><span><b>Check for updates once a day</b><small>Asks GitHub which version is the latest. Nothing is installed.</small></span></label>
+      <label><input type="checkbox" id="autoReload"><span><b>Load updates automatically</b><small>Switch to the new version as soon as the updater has installed it</small></span></label>
+    </div>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>
