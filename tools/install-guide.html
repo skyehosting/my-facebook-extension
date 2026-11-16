@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>My Facebook - last step</title>
+  <link rel="icon" href="../icons/icon48.png">
+  <style>
+    :root {
+      --bg: #f2f4f7; --card: #ffffff; --text: #1c1e21; --muted: #65676b;
+      --accent: #1b74e4; --line: #e4e6eb; --box: #f2f4f7; --ok: #1a7f37;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #18191a; --card: #242526; --text: #e4e6eb; --muted: #a8abaf;
+        --accent: #4599ff; --line: #3a3d42; --box: #18191a; --ok: #57c273;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, "Segoe UI", sans-serif; }
+    main { max-width: 720px; margin: 0 auto; padding: 32px 16px 56px; }
+    header { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+    header img { border-radius: 10px; }
+    h1 { margin: 0; font-size: 24px; }
+    .lead { margin: 6px 0 24px; color: var(--muted); }
+    ol { list-style: none; margin: 0; padding: 0; counter-reset: step; }
+    li.step {
+      counter-increment: step; position: relative;
+      margin-bottom: 14px; padding: 18px 18px 18px 64px;
+      background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    }
+    li.step::before {
+      content: counter(step); position: absolute; left: 18px; top: 18px;
+      width: 30px; height: 30px; border-radius: 50%;
+      background: var(--accent); color: #fff; font-weight: 700;
+      display: grid; place-items: center;
+    }
+    li.step h2 { margin: 2px 0 6px; font-size: 17px; }
+    li.step p { margin: 0 0 8px; }
+    li.step p:last-child { margin-bottom: 0; }
+    a { color: var(--accent); }
+    .muted { color: var(--muted); font-size: 14px; }
+    .copy { display: flex; gap: 8px; align-items: stretch; margin: 8px 0; }
+    .copy code {
+      flex: 1; min-width: 0; padding: 9px 12px; border-radius: 8px;
+      background: var(--box); border: 1px solid var(--line);
+      font: 14px/1.4 Consolas, "Cascadia Mono", monospace; overflow-wrap: anywhere;
+    }
+    button {
+      flex: none; padding: 0 16px; border: 0; border-radius: 8px;
+      background: var(--accent); color: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    button.done { background: var(--ok); }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    kbd {
+      padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px;
+      background: var(--box); font: 13px Consolas, monospace;
+    }
+    .why { margin-top: 22px; padding: 14px 16px; border-radius: 12px; border: 1px dashed var(--line); color: var(--muted); font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <img src="../icons/icon48.png" alt="" width="44" height="44">
+      <h1>One last step</h1>
+    </header>
+    <p class="lead">My Facebook is downloaded. Your browser only lets <b>you</b> switch an extension on, so finish here. It takes about a minute.</p>
+
+    <ol>
+      <li class="step">
+        <h2>Open your browser's Extensions page</h2>
+        <p>Copy this address, open a new tab (<kbd>Ctrl</kbd> + <kbd>T</kbd>), paste it into the address bar and press <kbd>Enter</kbd>.</p>
+        <div class="copy"><code id="page">chrome://extensions</code><button type="button" data-copy="page">Copy</button></div>
+        <p class="muted">Websites cannot open that page for you, which is why it is a copy and paste.</p>
+      </li>
+      <li class="step">
+        <h2>Switch on Developer mode</h2>
+        <p>It is a switch in the top-right corner of the Extensions page. It only allows loading an extension from a folder.</p>
+      </li>
+      <li class="step">
+        <h2>Click "Load unpacked" and pick the folder</h2>
+        <p>Copy the folder below. In the window that opens, click the address bar at the top, paste (<kbd>Ctrl</kbd> + <kbd>V</kbd>), press <kbd>Enter</kbd>, then click <b>Select Folder</b>.</p>
+        <div class="copy"><code id="folder">(the folder shown in the installer window)</code><button type="button" data-copy="folder">Copy</button></div>
+        <p class="muted">Leave that folder where it is. The browser loads the extension from it every time it starts.</p>
+      </li>
+      <li class="step">
+        <h2>Open Facebook</h2>
+        <p>Go to <a href="https://www.facebook.com/">facebook.com</a>. Your home page now shows friends and accounts you follow. Click the My Facebook icon in the toolbar for its settings (pin it from the puzzle-piece menu if you do not see it).</p>
+      </li>
+    </ol>
+
+    <p class="why">Why the extra clicks? Chromium browsers (Brave, Chrome, Edge, Vivaldi, Opera) block every program from adding an extension that does not come from their store. That protects you from software installing extensions behind your back, and it means no installer can do this part.</p>
+  </main>
+
+  <script>
+    // The installer passes the folder and the browser's Extensions address after the "#",
+    // which stays on this computer (it is never sent anywhere).
+    (function () {
+      var params = new URLSearchParams(location.hash.slice(1));
+      var folder = params.get('folder');
+      var page = params.get('page');
+      if (folder) document.getElementById('folder').textContent = folder;
+      if (page && /^[a-z]+:\/\/extensions$/.test(page)) document.getElementById('page').textContent = page;
+
+      function copyText(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          return navigator.clipboard.writeText(text).catch(function () { return fallback(text); });
+        }
+        return Promise.resolve(fallback(text));
+      }
+      function fallback(text) {
+        var box = document.createElement('textarea');
+        box.value = text;
+        box.style.position = 'fixed';
+        box.style.opacity = '0';
+        document.body.appendChild(box);
+        box.select();
+        try { document.execCommand('copy'); } catch (e) { /* the text can still be selected by hand */ }
+        box.remove();
+      }
+      document.querySelectorAll('button[data-copy]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          copyText(document.getElementById(btn.getAttribute('data-copy')).textContent).then(function () {
+            btn.textContent = 'Copied';
+            btn.classList.add('done');
+            setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 2000);
+          });
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
