@@ -35,12 +35,14 @@
     reelsMode: 'following',   // whose reels to show: 'friends' | 'following' (friends + followed) | 'all'
     hideSideAds: true,        // "Sponsored" block in the right-hand column
     loadAhead: true,          // keep a few approved posts loaded below the screen
+    homeFeed: 'main',         // what facebook.com opens: 'main' (Facebook's mix) | 'both' (friends + pages) | 'friends' | 'pages'
     debug: false            // show hidden posts dimmed with the reason, log to console
   };
 
   function normalize(raw) {
     const s = Object.assign({}, DEFAULTS, raw);
     if (!['friends', 'following', 'all'].includes(s.reelsMode)) s.reelsMode = 'following';
+    if (!['main', 'both', 'friends', 'pages'].includes(s.homeFeed)) s.homeFeed = 'main';
     // Settings saved by version 1.0 had an on/off switch instead of a mode.
     if (raw && raw.reelsMode == null && raw.reelsFollowingOnly === false) s.reelsMode = 'all';
     delete s.reelsFollowingOnly;
@@ -50,6 +52,22 @@
 
   let settings = normalize(null);
   try { settings = normalize(JSON.parse(localStorage.getItem(LS_KEY) || '{}')); } catch (e) { /* first run */ }
+
+  // Facebook has feeds of its own that hold only friends' posts, or only posts from
+  // Pages you follow, newest first. Its server does the filtering there, so they arrive
+  // several times faster than the main feed, where most stories get thrown away here.
+  // 'both' opens the Friends feed too; the Pages posts are added to it (see mixTick).
+  const FEED_URLS = { both: '/?filter=friends&sk=h_chr', friends: '/?filter=friends&sk=h_chr', pages: '/?filter=pages&sk=h_chr' };
+  const MAIN_FEED_HASH = '#ffo-main';   // "show me the main feed this once"
+  const onPlainHome = () => (location.pathname === '/' || location.pathname === '/home.php') &&
+    !/[?&](filter|sk)=/.test(location.search) && location.hash !== MAIN_FEED_HASH;
+  function goChosenFeed() {
+    const target = settings.enabled ? FEED_URLS[settings.homeFeed] : null;
+    if (!target || !onPlainHome()) return false;
+    location.replace(target);
+    return true;
+  }
+  goChosenFeed();
 
   const now = () => Date.now();
   const log = (...a) => { if (settings.debug) console.debug('[My Facebook]', ...a); };
@@ -135,6 +153,7 @@
   const unfollowed = new Map();   // account id -> name
   const unfollowedReal = new Map();   // account id -> true when it was also unfollowed on Facebook
   let pendingFollow = [];         // [{ id, name, user }] waiting to be followed again on Facebook
+  let pendingUnfollow = [];       // [{ id, name, user }] unfollowed on the manage page, not yet on Facebook
   const followTried = new Set();  // one attempt per account per page load
   let followBusy = false;
   let hiddenActors = new Set();
@@ -231,6 +250,7 @@
     if (!viewer) return rendered;
     for (const k in viewer) {
       if (!k.includes('news_feed')) continue;
+      if (mix && k.includes(PAGES_STYLE)) continue;   // fetched for mixing in, not what is on the page
       const conn = deref(src, viewer[k]);
       const refs = conn && conn.edges && conn.edges.__refs;
       if (refs && refs.length) (k.startsWith('__') ? rendered : raw).push(refs);
@@ -511,6 +531,213 @@
     }, 600);
   }
 
+  /* ---------------- Friends + Pages in one feed ---------------- */
+  // Facebook's Friends feed and Pages feed are each fast, because its server only sends
+  // what belongs in them, but they are separate. With the "Friends + Pages" home feed the
+  // Friends feed is what is open, and this asks Facebook for the Pages feed as well, with
+  // the very request (and settings) the page itself uses to load more posts, then places
+  // those posts into the open feed by time, at most MIX_MAX_RUN in a row. Only the part of
+  // the feed that is not on the page yet is touched, so nothing that is already drawn moves.
+
+  const FRIENDS_STYLE = 'MOST_RECENT_FRIENDS_FEED';
+  const PAGES_STYLE = 'MOST_RECENT_PAGES_FEED';
+  const FEED_QUERY = 'CometNewsFeedPaginationQuery';
+  const MIX_GAP_MS = 1200;        // pause between two requests for Pages posts
+  const MIX_RETRY_MS = 15000;     // ...and after one that failed
+  const MIX_MAX_FAILS = 3;
+  const MIX_BACKLOG = 15;         // posts waiting to be drawn or placed before more are asked for
+  const MIX_WAIT_MS = 20000;      // how long to push the feed along to see Facebook's own request
+  const MIX_MAX_RUN = 3;          // Pages posts in a row; a busy Page would otherwise bury friends' posts
+  const REAL_TIME = 1e9;          // a creation time below this is a placeholder (ads have one)
+  let mix = null;                 // state while the combined feed is open
+
+  const mixing = () => settings.enabled && settings.homeFeed === 'both' && isHome &&
+    /[?&]filter=friends(&|$)/.test(location.search);
+
+  function stopMix() {
+    if (!mix) return;
+    if (mix.retained) { try { mix.retained.dispose(); } catch (e) { /* ignore */ } }
+    mix = null;
+  }
+
+  // The settings Facebook's own "load more posts" request was last sent with.
+  function hookFeedRequests() {
+    const env = relayEnv;
+    if (!env || typeof env.execute !== 'function' || env.__ffoHooked) return;
+    env.__ffoHooked = true;
+    const original = env.execute;
+    env.execute = function (config) {
+      try {
+        const request = config && config.operation && config.operation.request;
+        const params = request && request.node && request.node.params;
+        if (mix && params && params.name === FEED_QUERY && request.variables && request.variables.feedStyle === FRIENDS_STYLE) {
+          mix.vars = request.variables;
+        }
+      } catch (e) { /* never get in the way of the page's own request */ }
+      return original.apply(this, arguments);
+    };
+  }
+
+  function mixConnection(src, style) {
+    const viewer = viewerRecord(src);
+    if (!viewer) return null;
+    const mark = 'feed_style:"' + style + '"';
+    for (const k in viewer) {
+      if (k.startsWith('__') && k.includes('news_feed') && k.includes(mark)) return deref(src, viewer[k]);
+    }
+    return null;
+  }
+
+  function fetchPagesPosts(src) {
+    const state = mix;
+    let relay = null;
+    let query = null;
+    try {
+      relay = window.require('relay-runtime');
+      query = window.require(FEED_QUERY + '.graphql');
+    } catch (e) { /* handled below */ }
+    if (!relay || !query || typeof relay.fetchQuery !== 'function') { state.fails = MIX_MAX_FAILS; return; }
+    const conn = mixConnection(src, PAGES_STYLE);
+    const page = conn && deref(src, conn.page_info);
+    const vars = {};
+    for (const k in state.vars) if (!k.startsWith('__relay_internal__')) vars[k] = state.vars[k];
+    vars.feedStyle = PAGES_STYLE;
+    vars.cursor = state.started && page && page.end_cursor ? page.end_cursor : null;   // null = from the newest post
+    vars.recentVPVs = [];
+    try { vars.clientQueryId = crypto.randomUUID(); } catch (e) { /* keep the copied one */ }
+    state.busy = true;
+    state.lastAt = now();
+    const ticket = ++state.ticket;
+    const finish = (ok) => {
+      if (!state.busy || state.ticket !== ticket) return;   // already settled, or a later request
+      state.busy = false;
+      state.lastAt = now();
+      if (ok) { state.started = true; state.fails = 0; } else { state.fails++; log('pages posts: request failed'); }
+      if (state === mix) setTimeout(mixTick, 0);
+    };
+    try {
+      if (typeof relay.createOperationDescriptor === 'function' && typeof relayEnv.retain === 'function') {
+        // Keeps the fetched posts in Facebook's store until they have been placed in the feed.
+        const keep = relayEnv.retain(relay.createOperationDescriptor(query, vars));
+        if (state.retained) { try { state.retained.dispose(); } catch (e) { /* ignore */ } }
+        state.retained = keep;
+      }
+      relay.fetchQuery(relayEnv, query, vars, { networkCacheConfig: { force: true } })
+        .subscribe({ complete: () => finish(true), error: () => finish(false) });
+    } catch (e) {
+      finish(false);
+    }
+    setTimeout(() => finish(false), 30000);
+  }
+
+  function mixTick() {
+    if (!mixing()) { stopMix(); return; }
+    const src = source();
+    if (!src) return;
+    if (!mix) mix = { since: now(), vars: null, busy: false, ticket: 0, started: false, done: false, fails: 0, lastAt: 0, seen: new Set(), held: [], retained: null };
+    hookFeedRequests();
+    const viewer = viewerRecord(src);
+    const friendsConn = mixConnection(src, FRIENDS_STYLE);
+    const friendRefs = friendsConn && friendsConn.edges && friendsConn.edges.__refs;
+    if (!viewer || !friendRefs || !friendRefs.length) return;
+
+    const timeOf = (edgeId) => {
+      const edge = edgeId != null ? src.get(edgeId) : null;
+      const node = edge && deref(src, edge.node);
+      return node && node.__typename === 'Story' && node.creation_time > REAL_TIME ? node.creation_time : 0;
+    };
+
+    // New posts in the Pages feed: keep the ones that would be shown anyway.
+    const pagesConn = mix.started ? mixConnection(src, PAGES_STYLE) : null;
+    const pageRefs = (pagesConn && pagesConn.edges && pagesConn.edges.__refs) || [];
+    const inFeed = new Set();
+    for (const id of friendRefs) {
+      const edge = id != null ? src.get(id) : null;
+      if (edge && edge.node && edge.node.__ref) inFeed.add(edge.node.__ref);
+    }
+    let pagesOldest = 0;
+    for (const id of pageRefs) {
+      if (id == null) continue;
+      const t = timeOf(id);
+      if (t) pagesOldest = t;
+      if (mix.seen.has(id)) continue;
+      const edge = src.get(id);
+      const node = edge && deref(src, edge.node);
+      if (!node || !node.__typename) continue;   // still arriving
+      mix.seen.add(id);
+      if (!t || inFeed.has(edge.node.__ref) || !judge(src, node, edge).show) continue;
+      mix.held.push({ id, t });
+    }
+
+    // How far back the friends' posts loaded so far go.
+    let horizon = 0;
+    for (let i = friendRefs.length - 1; i >= 0 && !horizon; i--) {
+      if (!mix.seen.has(friendRefs[i])) horizon = timeOf(friendRefs[i]);
+    }
+    const friendsPage = deref(src, friendsConn.page_info);
+    const friendsDone = !!friendsPage && friendsPage.has_next_page === false;
+
+    let drawn = 0;   // feed entries already on the page
+    for (const el of document.querySelectorAll('div[aria-posinset]')) {
+      if (el.parentElement && el.parentElement.closest('[aria-posinset]')) continue;
+      const pos = parseInt(el.getAttribute('aria-posinset'), 10);
+      if (pos > drawn) drawn = pos;
+    }
+
+    // Place every held post that is not older than the friends' posts loaded so far.
+    const ready = mix.held.filter((c) => friendsDone || !horizon || c.t >= horizon).sort((a, b) => b.t - a.t);
+    if (ready.length) {
+      const used = new Set();   // the ones that found a place this time
+      try {
+        const relay = window.require('relay-runtime');
+        const connId = friendsConn.__id;
+        relay.commitLocalUpdate(relayEnv, (store) => {
+          const conn = connId && store.get(connId);
+          const edges = conn && conn.getLinkedRecords('edges');
+          if (!edges) return;
+          const cut = Math.min(drawn, edges.length);
+          const merged = edges.slice(0, cut);
+          // Pages posts already in a row at the end of what is drawn.
+          let run = 0;
+          for (let i = cut - 1; i >= 0 && edges[i] && mix.seen.has(edges[i].getDataID()); i--) run++;
+          let next = 0;
+          let carry = Infinity;   // entries without a real time (ads) stay where they are
+          const place = () => {
+            const add = store.get(ready[next].id);
+            used.add(ready[next++].id);
+            if (add) { merged.push(add); run++; }
+          };
+          for (const rec of edges.slice(cut)) {
+            const id = rec ? rec.getDataID() : null;
+            if (id != null && mix.seen.has(id)) { merged.push(rec); run++; continue; }   // placed earlier
+            const real = id != null ? timeOf(id) : 0;
+            const t = real || carry;
+            carry = t;
+            while (next < ready.length && ready[next].t > t && run < MIX_MAX_RUN) place();
+            merged.push(rec);
+            if (real) run = 0;   // a friend's post; ads are invisible and do not break up a run
+          }
+          while (next < ready.length && (friendsDone || run < MIX_MAX_RUN)) place();
+          if (used.size) conn.setLinkedRecords(merged, 'edges');
+        });
+      } catch (e) {
+        log('pages posts: could not place them', e);
+        mix.fails = MIX_MAX_FAILS;
+      }
+      mix.held = mix.held.filter((c) => !used.has(c.id));
+      if (used.size) { log('pages posts placed:', used.size); scheduleAhead(0); }
+    }
+
+    // Ask for more Pages posts while they have not caught up with the friends' posts.
+    if (mix.busy || mix.done || mix.fails >= MIX_MAX_FAILS || !mix.vars) return;
+    if (now() - mix.lastAt < (mix.fails ? MIX_RETRY_MS : MIX_GAP_MS)) return;
+    const pagesPage = pagesConn && deref(src, pagesConn.page_info);
+    if (mix.started && pagesPage && pagesPage.has_next_page === false) { mix.done = true; return; }
+    const backlog = Math.max(0, friendRefs.length - drawn) + mix.held.length;
+    const behind = friendsDone || !pagesOldest || !horizon || pagesOldest >= horizon;
+    if (!mix.started || (behind && backlog < MIX_BACKLOG)) fetchPagesPosts(src);
+  }
+
   /* ---------------- Loading ahead ---------------- */
   // Facebook sends the feed a few stories at a time, about one a second, and only asks
   // for more when an empty marker element after the last post comes on screen. With most
@@ -533,7 +760,7 @@
 
   function scheduleAhead(delay) {
     if (aheadTimer || !isHome || !settings.loadAhead) return;
-    aheadTimer = setTimeout(() => { aheadTimer = 0; loadAhead(); }, delay == null ? 250 : delay);
+    aheadTimer = setTimeout(() => { aheadTimer = 0; mixTick(); loadAhead(); }, delay == null ? 250 : delay);
   }
 
   // The element whose children are the feed's entries, found from the last post.
@@ -570,7 +797,10 @@
       past++;
       if (post.getAttribute('data-ffo') === 'show') ready++;
     }
-    if (!marker || ready >= AHEAD_POSTS || past >= AHEAD_MAX_ENTRIES || now() < pullPausedUntil) { stopPull(); return; }
+    // The combined feed copies the settings of Facebook's own "load more" request, so until
+    // one has gone out (and for a short while only) keep loading even with enough posts ready.
+    const wantRequest = !!mix && !mix.vars && now() - mix.since < MIX_WAIT_MS;
+    if (!marker || (ready >= AHEAD_POSTS && !wantRequest) || past >= AHEAD_MAX_ENTRIES || now() < pullPausedUntil) { stopPull(); return; }
     if (pullEl !== marker) {
       stopPull();
       marker.setAttribute('data-ffo-pull', '');
@@ -732,23 +962,36 @@
     });
   }
 
-  // Accounts to follow again on Facebook (queued from the popup, or after a failed attempt).
+  // Changes queued from the popup or the manage page (or after a failed attempt): accounts
+  // to follow again, and accounts to unfollow, on Facebook itself. They are carried out in
+  // any Facebook tab where Facebook's own follow actions happen to be loaded.
   function processPendingFollows() {
-    if (followBusy || !pendingFollow.length || !fbFollowActions()) return;
-    const next = pendingFollow.find((p) => !followTried.has(p.id));
+    if (followBusy || (!pendingFollow.length && !pendingUnfollow.length) || !fbFollowActions()) return;
+    let on = false;
+    let next = pendingUnfollow.find((p) => !followTried.has('u' + p.id));
+    if (!next) { on = true; next = pendingFollow.find((p) => !followTried.has('f' + p.id)); }
     if (!next) return;
-    followTried.add(next.id);
+    followTried.add((on ? 'f' : 'u') + next.id);
     followBusy = true;
-    fbSetFollow({ id: next.id, user: next.user }, true, (ok) => {
+    fbSetFollow({ id: next.id, user: next.user }, on, (ok) => {
       followBusy = false;
-      if (ok === true) {
-        pendingFollow = pendingFollow.filter((p) => p.id !== next.id);
-        toBridge('followDone', { id: next.id });
-        toast('Following ' + (next.name || 'that account') + ' again on Facebook.', 6000);
+      const who = next.name || 'that account';
+      if (on) {
+        if (ok === true) {
+          pendingFollow = pendingFollow.filter((p) => p.id !== next.id);
+          toBridge('followDone', { id: next.id });
+          toast('Following ' + who + ' again on Facebook.', 6000);
+        } else {
+          toBridge('followFailed', { id: next.id });
+        }
+      } else if (ok === true) {
+        pendingUnfollow = pendingUnfollow.filter((p) => p.id !== next.id);
+        unfollowedReal.set(next.id, true);
+        toBridge('unfollowDone', { id: next.id });
+        toast('Unfollowed ' + who + ' on Facebook.', 6000);
       } else {
-        toBridge('followFailed', { id: next.id });
+        toBridge('unfollowFailed', { id: next.id });
       }
-      setTimeout(processPendingFollows, 1500);
     });
   }
 
@@ -1404,6 +1647,7 @@
     else { html.removeAttribute('data-ffo-home-init'); setFlag('data-ffo-strict', false); firstPostAt = 0; }
     if (!isReel) { reelEmpty = false; blockReel(false); }
     if (!isHome) stopPull();
+    if (!mixing()) stopMix();
   }
 
   function onUrl() {
@@ -1422,6 +1666,7 @@
       replay = null; pendingResume = null;
       try { sessionStorage.removeItem(REPLAY_KEY); } catch (e) { /* ignore */ }
     }
+    if (goChosenFeed()) return;
     updatePage();
     if (isReel) {
       if (!replay && id && followingMode() === true && noteArrival(id)) { blockReel(true); skipReel(); return; }
@@ -1488,11 +1733,25 @@
   /* Settings                                                            */
   /* ------------------------------------------------------------------ */
 
+  let settingsSynced = false;   // the saved settings have arrived from the extension
   function applySettings(next) {
     const before = JSON.stringify(settings);
+    const feedBefore = settings.homeFeed;
     settings = normalize(next);
     try { localStorage.setItem(LS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
+    const first = !settingsSynced;
+    settingsSynced = true;
+    // The saved settings have arrived (Facebook clears the copy kept in the page, so at
+    // first the defaults were in use): open the chosen home feed if this is the plain home.
+    if (first && goChosenFeed()) return;
     if (JSON.stringify(settings) === before) return;
+    if (!first && settings.homeFeed !== feedBefore && settings.enabled && location.hash !== MAIN_FEED_HASH &&
+        (location.pathname === '/' || location.pathname === '/home.php')) {
+      // The home feed choice was changed while a feed is open: go to the newly chosen one,
+      // unless that is the feed already open (Friends and Friends + Pages share one).
+      const target = FEED_URLS[settings.homeFeed] || '/';
+      if (location.pathname + location.search !== target) { location.assign(target); return; }
+    }
     refreshAll();
   }
 
@@ -1547,6 +1806,10 @@
       pendingFollow = d.pendingFollow.filter((p) => p && p.id).map((p) => ({ id: String(p.id), name: String(p.name || ''), user: p.user !== false }));
       if (pendingFollow.length) setTimeout(processPendingFollows, 2500);
     }
+    if (Array.isArray(d.pendingUnfollow)) {
+      pendingUnfollow = d.pendingUnfollow.filter((p) => p && p.id).map((p) => ({ id: String(p.id), name: String(p.name || ''), user: p.user !== false }));
+      if (pendingUnfollow.length) setTimeout(processPendingFollows, 2500);
+    }
     if (Array.isArray(d.reels)) {
       // The stored replay list (on start, or after another tab or the popup changed it).
       library.clear();
@@ -1570,13 +1833,25 @@
   /* ------------------------------------------------------------------ */
   // The popup's "Sync" button opens facebook.com/friends/list#ffo-sync. On that page the
   // full friends list is in Facebook's store once the list has been scrolled to its end,
-  // so this scrolls it and records the ids. Nothing leaves the browser.
+  // so this scrolls it and records the ids (plus name, address and picture for the manage
+  // page). The manage page's other "Sync" button does the same for the accounts you follow,
+  // on facebook.com/me/following#ffo-sync. Nothing leaves the browser.
 
   const SYNC_HASH = '#ffo-sync';
   let syncRequested = location.hash === SYNC_HASH;
 
+  const personPicture = (src, rec) => {
+    for (const k in rec) {
+      if (!k.startsWith('profile_picture') && !k.startsWith('image')) continue;
+      const pic = deref(src, rec[k]);
+      if (pic && typeof pic.uri === 'string') return pic.uri;
+    }
+    return '';
+  };
+
   function collectFriends(src) {
     const ids = new Set();
+    const items = new Map();
     let most = -1;
     let hasNext = null;
     const viewer = viewerRecord(src);
@@ -1589,7 +1864,12 @@
       for (const r of refs) {
         const edge = r != null ? src.get(r) : null;
         const node = edge && deref(src, edge.node);
-        if (node && node.id) ids.add(String(node.id));
+        if (!node || !node.id) continue;
+        const id = String(node.id);
+        ids.add(id);
+        if (!items.has(id)) {
+          items.set(id, { id, name: clean(node.name), url: typeof node.url === 'string' ? node.url : '', pic: personPicture(src, node) });
+        }
       }
       if (refs.length > most) {
         most = refs.length;
@@ -1597,7 +1877,75 @@
         hasNext = page ? page.has_next_page : null;
       }
     }
-    return { ids, hasNext };
+    return { ids, hasNext, items };
+  }
+
+  // The "Following" list on your own profile: [{ id, name, url, pic }]
+  function collectFollowing(src) {
+    const items = new Map();
+    let hasNext = null;
+    let found = false;
+    for (const recId of src.getRecordIDs()) {
+      const col = src.get(recId);
+      if (!col || col.__typename !== 'TimelineAppCollection' || col.tab_key !== 'following') continue;
+      for (const k in col) {
+        if (!k.includes('pageItems')) continue;
+        const conn = deref(src, col[k]);
+        const refs = conn && conn.edges && conn.edges.__refs;
+        if (!refs) continue;
+        found = true;
+        for (const r of refs) {
+          const edge = r != null ? src.get(r) : null;
+          const item = edge && deref(src, edge.node);
+          const node = item && deref(src, item.node);
+          if (!node || !node.id || !/^\d+$/.test(String(node.id))) continue;
+          const title = deref(src, item.title);
+          const url = field(item, 'url');
+          items.set(String(node.id), {
+            id: String(node.id),
+            name: clean(title && title.text),
+            url: typeof url === 'string' ? url : '',
+            pic: personPicture(src, item)
+          });
+        }
+        const page = deref(src, conn.page_info);
+        hasNext = page ? page.has_next_page : null;
+      }
+    }
+    return { items, hasNext, found };
+  }
+
+  function syncFollowing() {
+    if (syncing) return;
+    syncing = true;
+    notice('My Facebook is reading the list of accounts you follow...');
+    let rounds = 0;
+    let unchanged = 0;
+    let lastCount = -1;
+    const finish = (items, complete) => {
+      syncing = false;
+      syncRequested = false;
+      notice('');
+      window.scrollTo(0, 0);
+      try { history.replaceState(history.state, '', location.pathname + location.search); } catch (e) { /* ignore */ }
+      if (!items.size) { toast('My Facebook could not read who you follow. Press Sync again to retry.', 8000); return; }
+      toBridge('following', { items: Array.from(items.values()), complete });
+      toast('Following list synced: ' + items.size + (items.size === 1 ? ' account' : ' accounts') + '. You can close this tab.', 9000);
+    };
+    const step = () => {
+      const src = source();
+      const got = src ? collectFollowing(src) : { items: new Map(), hasNext: null, found: false };
+      rounds++;
+      if (got.items.size === lastCount) unchanged++; else { unchanged = 0; lastCount = got.items.size; }
+      if (got.found && got.hasNext === false) { finish(got.items, true); return; }
+      if (rounds > 200 || unchanged >= 15) { finish(got.items, false); return; }
+      // The list loads its next part when the page is scrolled *to* its end, so back off and return.
+      const end = document.documentElement.scrollHeight;
+      window.scrollTo(0, Math.max(0, end - window.innerHeight - 600));
+      setTimeout(() => { window.scrollTo(0, document.documentElement.scrollHeight); }, 250);
+      setTimeout(step, 900);
+    };
+    setTimeout(step, 1500);
   }
 
   function friendsListScroller() {
@@ -1619,7 +1967,7 @@
     let rounds = 0;
     let unchanged = 0;
     let lastCount = -1;
-    const finish = (ids, complete) => {
+    const finish = (ids, complete, items) => {
       syncing = false;
       syncRequested = false;
       notice('');
@@ -1627,16 +1975,16 @@
       if (!ids.size) { toast('My Facebook could not read your friends list. Press Sync again to retry.', 8000); return; }
       if (complete) friends.clear();
       ids.forEach((id) => friends.add(id));
-      toBridge('friends', { ids: Array.from(friends), complete });
+      toBridge('friends', { ids: Array.from(friends), complete, items: Array.from(items.values()) });
       toast('Friends list synced: ' + friends.size + ' friends. You can close this tab.', 9000);
     };
     const step = () => {
       const src = source();
-      const got = src ? collectFriends(src) : { ids: new Set(), hasNext: null };
+      const got = src ? collectFriends(src) : { ids: new Set(), hasNext: null, items: new Map() };
       rounds++;
       if (got.ids.size === lastCount) unchanged++; else { unchanged = 0; lastCount = got.ids.size; }
-      if (got.ids.size && got.hasNext === false) { finish(got.ids, true); return; }
-      if (rounds > 90 || (got.ids.size && unchanged >= 15)) { finish(got.ids, false); return; }
+      if (got.ids.size && got.hasNext === false) { finish(got.ids, true, got.items); return; }
+      if (rounds > 90 || (got.ids.size && unchanged >= 15)) { finish(got.ids, false, got.items); return; }
       // Facebook loads the next page when the list is scrolled *to* its end, so back off and return.
       const list = friendsListScroller();
       if (list) {
@@ -1674,6 +2022,7 @@
     if (isHome) rescanFeed();
     if (isReel) reelTick();
     if (syncRequested && /^\/friends\/list/.test(location.pathname)) syncFriends();
+    if (syncRequested && /\/following\/?$/.test(location.pathname)) syncFollowing();
   };
   document.addEventListener('DOMContentLoaded', boot);
   window.addEventListener('load', boot);
@@ -1681,8 +2030,8 @@
     if (!settings.enabled) return;
     try { onUrl(); } catch (e) { /* ignore */ }
     if (isReel) scheduleReelTick(0);
-    if (isHome && pendingFollow.length) processPendingFollows();
-    if (isHome) scheduleAhead();
+    if (pendingFollow.length || pendingUnfollow.length) processPendingFollows();
+    if (isHome) { mixTick(); scheduleAhead(); }
   }, 1000);
   // Scrolling uses up the posts that were loaded ahead; coming back to the tab resumes loading.
   window.addEventListener('scroll', () => { if (isHome) scheduleAhead(); }, { passive: true, capture: true });

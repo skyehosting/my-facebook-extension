@@ -133,6 +133,7 @@ header img { border-radius: 7px; }
   cursor: pointer;
 }
 
+.friends-row.manage-row { margin: 0 0 12px; }
 .friends-row.quiet { background: transparent; padding: 2px 2px 0; color: var(--muted); margin-top: 6px; }
 .friends-row button.plain { background: transparent; color: var(--accent); padding: 2px 4px; }
 

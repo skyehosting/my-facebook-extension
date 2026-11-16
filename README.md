@@ -4,6 +4,8 @@ A browser extension for Brave, Chrome and other Chromium browsers that turns fac
 
 - **Home feed:** only posts from friends and accounts you follow. Ads, "Suggested for you" posts, the Reels shelf, "People you may know" and group suggestions are removed before they are drawn.
 - **Loads ahead:** Facebook sends the feed a few stories at a time and most of them get filtered out, so the extension keeps a few of your posts loaded below the screen. Can be turned off in the popup.
+- **Home feed choice:** instead of Facebook's main feed, open **Friends + Pages** (friends' posts and Pages you follow in one list, newest first), or Facebook's Friends feed or Pages feed alone. Facebook filters those itself, so posts arrive several times faster.
+- **Who you follow:** a page (the popup's Manage button) listing the accounts you follow, your friends and who you unfollowed, with Unfollow and Follow again buttons.
 - **Reels:** choose whose reels you get: friends only, friends plus accounts you follow, or everything. Reels you have seen are replayed newest first in a loop when there is nothing new.
 - **Unfollow from the post menu:** each post's "..." menu gets an Unfollow / Follow again entry.
 - **Updates:** the extension checks this page once a day and tells you when a newer version exists.
@@ -55,6 +57,7 @@ To publish a new version, raise `"version"` in `manifest.json` and push to `main
 | `src/background.js` | Daily update check; loads a new version once it is on disk |
 | `src/style.css` | Styles for hidden posts and the extension's notices |
 | `popup/` | The settings popup |
+| `manage/` | The "Who you follow" page |
 | `tools/update.ps1` | The updater that `Update My Facebook.bat` runs |
 
 ## Good to know

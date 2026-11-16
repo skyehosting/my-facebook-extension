@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>My Facebook - Following</title>
+  <link rel="icon" href="../icons/icon48.png">
+  <link rel="stylesheet" href="manage.css">
+</head>
+<body>
+  <main>
+    <header>
+      <img src="../icons/icon48.png" alt="" width="36" height="36">
+      <div>
+        <h1>Who you follow</h1>
+        <p>Unfollow accounts, or follow them again, in one place.</p>
+      </div>
+    </header>
+
+    <div class="tabs" role="tablist" aria-label="Lists">
+      <button type="button" role="tab" id="tab-following" data-tab="following" aria-controls="panel">Following <span class="count"></span></button>
+      <button type="button" role="tab" id="tab-friends" data-tab="friends" aria-controls="panel">Friends <span class="count"></span></button>
+      <button type="button" role="tab" id="tab-unfollowed" data-tab="unfollowed" aria-controls="panel">Unfollowed <span class="count"></span></button>
+    </div>
+
+    <p id="pending" class="banner" hidden>
+      <span id="pendingText"></span>
+      <button type="button" id="openFacebook">Open Facebook</button>
+    </p>
+
+    <section id="panel" role="tabpanel" tabindex="-1">
+      <div class="toolbar">
+        <input type="search" id="search" placeholder="Search by name" aria-label="Search by name" autocomplete="off">
+        <span id="synced" class="muted"></span>
+        <button type="button" id="sync" class="secondary">Sync</button>
+      </div>
+      <p id="intro" class="muted"></p>
+      <ul id="list" class="people"></ul>
+      <div id="empty" class="empty" hidden>
+        <p id="emptyText"></p>
+        <button type="button" id="emptySync">Sync</button>
+      </div>
+    </section>
+  </main>
+  <script src="manage.js"></script>
+</body>
+</html>

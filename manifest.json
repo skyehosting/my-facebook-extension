@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "My Facebook - Friends & Following Only",
   "short_name": "My Facebook",
-  "version": "1.5.0",
+  "version": "1.7.2",
   "description": "Shows only posts and reels from your friends and the people/pages you follow. Hides ads, suggested posts, and everything else.",
   "homepage_url": "https://github.com/skyehosting/my-facebook-extension",
   "permissions": ["storage", "alarms"],

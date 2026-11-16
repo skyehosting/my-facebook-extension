@@ -13,16 +13,19 @@
     reelsMode: 'following',   // 'friends' | 'following' | 'all'
     hideSideAds: true,
     loadAhead: true,          // keep a few approved posts loaded below the screen
+    homeFeed: 'main',         // what facebook.com opens: 'main' | 'both' | 'friends' | 'pages'
     checkUpdates: true,      // ask GitHub once a day whether a newer version exists
     autoReload: true,         // load a new version by itself once the updater has installed it
     debug: false
   };
   const MAX_CONNECTED = 5000;
   const MAX_FRIENDS = 10000;
+  const MAX_FOLLOWING = 5000;
 
   function normalize(raw) {
     const s = Object.assign({}, DEFAULTS, raw);
     if (!['friends', 'following', 'all'].includes(s.reelsMode)) s.reelsMode = 'following';
+    if (!['main', 'both', 'friends', 'pages'].includes(s.homeFeed)) s.homeFeed = 'main';
     if (raw && raw.reelsMode == null && raw.reelsFollowingOnly === false) s.reelsMode = 'all';
     delete s.reelsFollowingOnly;
     delete s.filterReelShelf;
@@ -63,13 +66,30 @@
       id: p.id, name: String(p.name || '').slice(0, 120), user: p.user !== false, tries: Number(p.tries) || 0
     }))
     : []);
+  // [{ id, name, user, tries }] accounts unfollowed on the manage page, to unfollow on Facebook too.
+  let pendingUnfollow = [];
+  // People for the manage page: [{ id, name, url, pic }], addresses limited to Facebook's own.
+  const webAddress = (v, hosts) => {
+    try {
+      const u = new URL(String(v || ''));
+      return u.protocol === 'https:' && hosts.test(u.hostname) && u.href.length <= 900 ? u.href : '';
+    } catch (e) { return ''; }
+  };
+  const validPeople = (list, max) => (Array.isArray(list)
+    ? list.filter((x) => x && idOrEmpty(x.id)).slice(0, max).map((x) => ({
+      id: x.id,
+      name: String(x.name || '').slice(0, 120),
+      url: webAddress(x.url, /(^|\.)facebook\.com$/),
+      pic: webAddress(x.pic, /(^|\.)(fbcdn\.net|facebook\.com)$/)
+    }))
+    : []);
   let loaded = false;
   let saveTimer = 0;
   let reelSaveTimer = 0;
 
   const alive = () => { try { return !!chrome.runtime.id; } catch (e) { return false; } };
   const send = (payload) => window.postMessage(Object.assign({ __ffo: 'bridge' }, payload), location.origin);
-  const sendInit = () => send({ settings, connected, friends, reels, unfollowed, pendingFollow });
+  const sendInit = () => send({ settings, connected, friends, reels, unfollowed, pendingFollow, pendingUnfollow });
   const saveReels = () => {
     clearTimeout(reelSaveTimer);
     reelSaveTimer = setTimeout(() => {
@@ -79,8 +99,9 @@
     }, 1000);
   };
 
-  chrome.storage.local.get({ settings: {}, connected: [], friends: null, reels: [], unfollowed: [], pendingFollow: [] }, (data) => {
+  chrome.storage.local.get({ settings: {}, connected: [], friends: null, reels: [], unfollowed: [], pendingFollow: [], pendingUnfollow: [] }, (data) => {
     pendingFollow = validPending(data.pendingFollow);
+    pendingUnfollow = validPending(data.pendingUnfollow);
     settings = normalize(data.settings);
     connected = validIds(data.connected);
     friends = validIds(data.friends && data.friends.ids);
@@ -112,6 +133,10 @@
       pendingFollow = validPending(changes.pendingFollow.newValue);
       send({ pendingFollow });
     }
+    if (changes.pendingUnfollow) {
+      pendingUnfollow = validPending(changes.pendingUnfollow.newValue);
+      send({ pendingUnfollow });
+    }
   });
 
   window.addEventListener('message', (ev) => {
@@ -122,7 +147,27 @@
     if (d.type === 'friends') {
       // Result of a friends-list sync on facebook.com/friends/list.
       const ids = validIds(d.ids).slice(0, MAX_FRIENDS);
-      if (ids.length && alive()) chrome.storage.local.set({ friends: { ids, syncedAt: Date.now(), complete: d.complete === true } });
+      if (ids.length && alive()) {
+        chrome.storage.local.set({ friends: { ids, syncedAt: Date.now(), complete: d.complete === true, items: validPeople(d.items, MAX_FRIENDS) } });
+      }
+      return;
+    }
+    if (d.type === 'following') {
+      // Result of a sync of the accounts you follow, on your profile's Following list.
+      const items = validPeople(d.items, MAX_FOLLOWING);
+      if (items.length && alive()) chrome.storage.local.set({ following: { items, syncedAt: Date.now(), complete: d.complete === true } });
+      return;
+    }
+    if ((d.type === 'unfollowDone' || d.type === 'unfollowFailed') && idOrEmpty(d.id)) {
+      // An unfollow queued on the manage page was carried out on Facebook, or was refused.
+      const had = pendingUnfollow.find((p) => p.id === d.id);
+      pendingUnfollow = pendingUnfollow.filter((p) => p.id !== d.id);
+      if (d.type === 'unfollowDone') {
+        unfollowed = unfollowed.map((u) => (u.id === d.id ? Object.assign({}, u, { real: true }) : u));
+      } else if (had && had.tries < 2) {
+        pendingUnfollow.push(Object.assign({}, had, { tries: had.tries + 1 }));   // dropped after three failures
+      }
+      if (alive()) chrome.storage.local.set({ unfollowed, pendingUnfollow });
       return;
     }
     if (d.type === 'reels') {
@@ -146,7 +191,9 @@
         // Unfollowed again: a queued "follow again" for the same account no longer applies.
         pendingFollow = pendingFollow.filter((p) => p.id !== d.id);
       }
-      if (alive()) chrome.storage.local.set({ unfollowed, pendingFollow });
+      // Either way the post menu has now dealt with this account, so drop a queued unfollow.
+      pendingUnfollow = pendingUnfollow.filter((p) => p.id !== d.id);
+      if (alive()) chrome.storage.local.set({ unfollowed, pendingFollow, pendingUnfollow });
       return;
     }
     if ((d.type === 'followPending' || d.type === 'followDone' || d.type === 'followFailed') && idOrEmpty(d.id)) {

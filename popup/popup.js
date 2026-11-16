@@ -6,6 +6,7 @@ const DEFAULTS = {
   reelsMode: 'following',   // 'friends' | 'following' | 'all'
   hideSideAds: true,
   loadAhead: true,          // keep a few approved posts loaded below the screen
+  homeFeed: 'main',         // what facebook.com opens: 'main' | 'both' | 'friends' | 'pages'
   checkUpdates: true,      // ask GitHub once a day whether a newer version exists
   autoReload: true,         // load a new version by itself once the updater has installed it
   debug: false
@@ -25,6 +26,12 @@ const REEL_HINTS = {
   friends: 'Only reels posted or shared by your friends, replayed newest first in a loop.',
   following: 'New reels from friends and accounts you follow, then a replay loop, newest first. Never "For you".',
   all: 'Facebook\'s normal reels, including "For you" and the Reels shelf in your feed.'
+};
+const FEED_HINTS = {
+  main: "Facebook's own mix. Most of it gets filtered out here, so posts arrive slowly.",
+  both: "Friends' posts and Pages you follow in one list, newest first. Loads several times faster than Main.",
+  friends: "Facebook's Friends feed: only friends' posts, newest first. Loads several times faster.",
+  pages: "Facebook's Pages feed: only Pages you follow, newest first. Loads several times faster."
 };
 const SYNC_URL = 'https://www.facebook.com/friends/list#ffo-sync';
 
@@ -79,6 +86,7 @@ function checkForUpdate(force) {
 function normalize(raw) {
   const s = Object.assign({}, DEFAULTS, raw);
   if (!['friends', 'following', 'all'].includes(s.reelsMode)) s.reelsMode = 'following';
+  if (!['main', 'both', 'friends', 'pages'].includes(s.homeFeed)) s.homeFeed = 'main';
   if (raw && raw.reelsMode == null && raw.reelsFollowingOnly === false) s.reelsMode = 'all';
   delete s.reelsFollowingOnly;
   delete s.filterReelShelf;
@@ -96,7 +104,14 @@ function render() {
   for (const key of CHECKBOXES) $(key).checked = !!settings[key];
   $('options').classList.toggle('off', !settings.enabled);
   $('reels').classList.toggle('off', !settings.enabled);
-  for (const btn of document.querySelectorAll('.seg button')) {
+  $('feed').classList.toggle('off', !settings.enabled);
+  for (const btn of document.querySelectorAll('#feedSeg button')) {
+    const on = btn.dataset.feed === settings.homeFeed;
+    btn.setAttribute('aria-checked', on ? 'true' : 'false');
+    btn.tabIndex = on ? 0 : -1;
+  }
+  $('feedHint').textContent = FEED_HINTS[settings.homeFeed];
+  for (const btn of document.querySelectorAll('#reelsSeg button')) {
     const on = btn.dataset.mode === settings.reelsMode;
     btn.setAttribute('aria-checked', on ? 'true' : 'false');
     btn.tabIndex = on ? 0 : -1;
@@ -144,7 +159,11 @@ function render() {
         pendingFollow = pendingFollow.filter((p) => p.id !== u.id);
         pendingFollow.push({ id: u.id, name: u.name || '', user: u.user !== false, tries: 0 });
       }
-      chrome.storage.local.set({ unfollowed, pendingFollow });
+      // An unfollow still queued from the manage page must not go through any more.
+      chrome.storage.local.get({ pendingUnfollow: [] }, (d) => {
+        const pendingUnfollow = (Array.isArray(d.pendingUnfollow) ? d.pendingUnfollow : []).filter((p) => p.id !== u.id);
+        chrome.storage.local.set({ unfollowed, pendingFollow, pendingUnfollow });
+      });
       render();
     });
     li.append(name, btn);
@@ -165,22 +184,32 @@ for (const key of CHECKBOXES) {
   });
 }
 
-const modeButtons = Array.from(document.querySelectorAll('.seg button'));
-modeButtons.forEach((btn, i) => {
-  btn.addEventListener('click', () => {
-    settings.reelsMode = btn.dataset.mode;
-    render();
-    save();
-    setTimeout(loadStats, 700);
+// A row of choices that works like radio buttons: click, or move with the arrow keys.
+function wireChoices(selector, choose) {
+  const buttons = Array.from(document.querySelectorAll(selector));
+  buttons.forEach((btn, i) => {
+    btn.addEventListener('click', () => {
+      choose(btn);
+      render();
+      save();
+      setTimeout(loadStats, 700);
+    });
+    btn.addEventListener('keydown', (ev) => {
+      const step = ev.key === 'ArrowRight' || ev.key === 'ArrowDown' ? 1 : ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' ? -1 : 0;
+      if (!step) return;
+      ev.preventDefault();
+      const next = buttons[(i + step + buttons.length) % buttons.length];
+      next.focus();
+      next.click();
+    });
   });
-  btn.addEventListener('keydown', (ev) => {
-    const step = ev.key === 'ArrowRight' || ev.key === 'ArrowDown' ? 1 : ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' ? -1 : 0;
-    if (!step) return;
-    ev.preventDefault();
-    const next = modeButtons[(i + step + modeButtons.length) % modeButtons.length];
-    next.focus();
-    next.click();
-  });
+}
+wireChoices('#reelsSeg button', (btn) => { settings.reelsMode = btn.dataset.mode; });
+wireChoices('#feedSeg button', (btn) => { settings.homeFeed = btn.dataset.feed; });
+
+// The page with everyone you follow, your friends and who you unfollowed.
+$('openManage').addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('manage/manage.html') });
 });
 
 // Opens your friends list in a new tab; the extension reads it there and saves the ids locally.
