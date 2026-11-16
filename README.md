@@ -4,7 +4,7 @@ A browser extension for Brave, Chrome and other Chromium browsers that turns fac
 
 - **Home feed:** only posts from friends and accounts you follow. Ads, "Suggested for you" posts, the Reels shelf, "People you may know" and group suggestions are removed before they are drawn.
 - **Loads ahead:** Facebook sends the feed a few stories at a time and most of them get filtered out, so the extension keeps a few of your posts loaded below the screen. Can be turned off in the popup.
-- **Home feed choice:** instead of Facebook's main feed, open **Friends + Pages** (friends' posts and Pages you follow in one list, newest first), or Facebook's Friends feed or Pages feed alone. Facebook filters those itself, so posts arrive several times faster.
+- **My feed:** the home page is filled with friends' posts and posts from Pages you follow, newest first. They come from Facebook's own Friends and Pages feeds, which its server filters itself, so posts arrive several times faster than from the main mix. The popup can switch back to Facebook's ranked mix, or open the Friends or Pages feed alone.
 - **Who you follow:** a page (the popup's Manage button) listing the accounts you follow, your friends and who you unfollowed, with Unfollow and Follow again buttons.
 - **Reels:** choose whose reels you get: friends only, friends plus accounts you follow, or everything. Reels you have seen are replayed newest first in a loop when there is nothing new.
 - **Unfollow from the post menu:** each post's "..." menu gets an Unfollow / Follow again entry.

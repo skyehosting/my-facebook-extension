@@ -35,14 +35,20 @@
     reelsMode: 'following',   // whose reels to show: 'friends' | 'following' (friends + followed) | 'all'
     hideSideAds: true,        // "Sponsored" block in the right-hand column
     loadAhead: true,          // keep a few approved posts loaded below the screen
-    homeFeed: 'main',         // what facebook.com opens: 'main' (Facebook's mix) | 'both' (friends + pages) | 'friends' | 'pages'
+    // What facebook.com shows: 'mine' (home page filled with friends' posts and Pages you follow),
+    // 'main' (Facebook's own mix, filtered), 'friends' or 'pages' (Facebook's feeds of that name).
+    homeFeed: 'mine',
+    feedV: 2,                 // marks settings saved since 'mine' exists (see normalize)
     debug: false            // show hidden posts dimmed with the reason, log to console
   };
 
   function normalize(raw) {
     const s = Object.assign({}, DEFAULTS, raw);
     if (!['friends', 'following', 'all'].includes(s.reelsMode)) s.reelsMode = 'following';
-    if (!['main', 'both', 'friends', 'pages'].includes(s.homeFeed)) s.homeFeed = 'main';
+    if (!['mine', 'main', 'friends', 'pages'].includes(s.homeFeed)) s.homeFeed = 'mine';
+    // Settings saved before 'mine' existed carry 'main' only because it was the default then.
+    if (raw && raw.feedV !== 2 && s.homeFeed === 'main') s.homeFeed = 'mine';
+    s.feedV = 2;
     // Settings saved by version 1.0 had an on/off switch instead of a mode.
     if (raw && raw.reelsMode == null && raw.reelsFollowingOnly === false) s.reelsMode = 'all';
     delete s.reelsFollowingOnly;
@@ -56,8 +62,7 @@
   // Facebook has feeds of its own that hold only friends' posts, or only posts from
   // Pages you follow, newest first. Its server does the filtering there, so they arrive
   // several times faster than the main feed, where most stories get thrown away here.
-  // 'both' opens the Friends feed too; the Pages posts are added to it (see mixTick).
-  const FEED_URLS = { both: '/?filter=friends&sk=h_chr', friends: '/?filter=friends&sk=h_chr', pages: '/?filter=pages&sk=h_chr' };
+  const FEED_URLS = { friends: '/?filter=friends&sk=h_chr', pages: '/?filter=pages&sk=h_chr' };
   const MAIN_FEED_HASH = '#ffo-main';   // "show me the main feed this once"
   const onPlainHome = () => (location.pathname === '/' || location.pathname === '/home.php') &&
     !/[?&](filter|sk)=/.test(location.search) && location.hash !== MAIN_FEED_HASH;
@@ -89,6 +94,7 @@
       if (!relayEnv) {
         if (typeof window.require !== 'function') return null;
         relayEnv = window.require('CometRelayEnvironment');
+        hookFeedRequests();   // as early as possible, so Facebook's first "load more" request is seen
       }
       return relayEnv.getStore().getSource();
     } catch (e) {
@@ -250,7 +256,8 @@
     if (!viewer) return rendered;
     for (const k in viewer) {
       if (!k.includes('news_feed')) continue;
-      if (mix && k.includes(PAGES_STYLE)) continue;   // fetched for mixing in, not what is on the page
+      // On the home page those two are fetched for filling the feed, not what is on the page.
+      if (ownFeedKey(k) && !/[?&]filter=/.test(location.search)) continue;
       const conn = deref(src, viewer[k]);
       const refs = conn && conn.edges && conn.edges.__refs;
       if (refs && refs.length) (k.startsWith('__') ? rendered : raw).push(refs);
@@ -531,32 +538,44 @@
     }, 600);
   }
 
-  /* ---------------- Friends + Pages in one feed ---------------- */
-  // Facebook's Friends feed and Pages feed are each fast, because its server only sends
-  // what belongs in them, but they are separate. With the "Friends + Pages" home feed the
-  // Friends feed is what is open, and this asks Facebook for the Pages feed as well, with
-  // the very request (and settings) the page itself uses to load more posts, then places
-  // those posts into the open feed by time, at most MIX_MAX_RUN in a row. Only the part of
-  // the feed that is not on the page yet is touched, so nothing that is already drawn moves.
+  /* ---------------- My feed: friends and Pages on the home page ---------------- */
+  // Facebook's main feed is mostly things that get thrown away here, and its server sends
+  // them about one a second. Its Friends feed and Pages feed hold only what is wanted, so
+  // with the "My feed" home feed the normal home page stays open and its feed is filled from
+  // those two instead: they are requested with the very request (and settings) the page
+  // itself uses to load more posts, and their posts are placed into the page's own list,
+  // newest first, at most MIX_MAX_RUN Pages posts in a row. Entries of Facebook's own mix
+  // that would be removed anyway are dropped before the page draws them. Only the part of
+  // the feed that is not on the page yet is touched, so nothing already drawn moves.
 
   const FRIENDS_STYLE = 'MOST_RECENT_FRIENDS_FEED';
   const PAGES_STYLE = 'MOST_RECENT_PAGES_FEED';
   const FEED_QUERY = 'CometNewsFeedPaginationQuery';
-  const MIX_GAP_MS = 1200;        // pause between two requests for Pages posts
+  const MIX_GAP_MS = 1200;        // pause between two requests to the same feed
   const MIX_RETRY_MS = 15000;     // ...and after one that failed
   const MIX_MAX_FAILS = 3;
-  const MIX_BACKLOG = 15;         // posts waiting to be drawn or placed before more are asked for
+  const MIX_BACKLOG = 10;         // placed posts waiting to be drawn before more are placed
+  const MIX_QUEUE = 6;            // posts kept in hand per feed before more are requested
   const MIX_WAIT_MS = 20000;      // how long to push the feed along to see Facebook's own request
   const MIX_MAX_RUN = 3;          // Pages posts in a row; a busy Page would otherwise bury friends' posts
   const REAL_TIME = 1e9;          // a creation time below this is a placeholder (ads have one)
-  let mix = null;                 // state while the combined feed is open
+  let mix = null;                 // state while "My feed" is filling the home page
+  let feedVars = null;            // settings of Facebook's own latest "load more posts" request
 
-  const mixing = () => settings.enabled && settings.homeFeed === 'both' && isHome &&
-    /[?&]filter=friends(&|$)/.test(location.search);
+  const mixWanted = () => settings.enabled && settings.homeFeed === 'mine';
+  const mixing = () => mixWanted() && isHome && !/[?&]filter=/.test(location.search) && location.hash !== MAIN_FEED_HASH;
+  const styleMark = (style) => 'feed_style:"' + style + '"';
+  const ownFeedKey = (k) => k.includes(styleMark(FRIENDS_STYLE)) || k.includes(styleMark(PAGES_STYLE));
+  const newStream = (style, pages) => ({
+    style, pages, busy: false, ticket: 0, started: false, done: false, fails: 0, lastAt: 0, queue: [], oldest: 0, retained: null
+  });
+  const streamOver = (st) => st.done || st.fails >= MIX_MAX_FAILS;
 
   function stopMix() {
     if (!mix) return;
-    if (mix.retained) { try { mix.retained.dispose(); } catch (e) { /* ignore */ } }
+    for (const st of mix.streams) {
+      if (st.retained) { try { st.retained.dispose(); } catch (e) { /* ignore */ } }
+    }
     mix = null;
   }
 
@@ -570,25 +589,38 @@
       try {
         const request = config && config.operation && config.operation.request;
         const params = request && request.node && request.node.params;
-        if (mix && params && params.name === FEED_QUERY && request.variables && request.variables.feedStyle === FRIENDS_STYLE) {
-          mix.vars = request.variables;
+        const vars = request && request.variables;
+        if (params && params.name === FEED_QUERY && vars && vars.feedStyle !== FRIENDS_STYLE && vars.feedStyle !== PAGES_STYLE) {
+          feedVars = vars;
         }
       } catch (e) { /* never get in the way of the page's own request */ }
       return original.apply(this, arguments);
     };
   }
 
-  function mixConnection(src, style) {
+  // The list the page draws from (Facebook's own feed), and the two fetched for filling it.
+  function hostConnection(src) {
+    const viewer = viewerRecord(src);
+    let best = null;
+    if (!viewer) return null;
+    for (const k in viewer) {
+      if (!k.startsWith('__') || !k.includes('news_feed') || ownFeedKey(k)) continue;
+      const conn = deref(src, viewer[k]);
+      const refs = conn && conn.edges && conn.edges.__refs;
+      if (refs && (!best || refs.length > best.edges.__refs.length)) best = conn;
+    }
+    return best;
+  }
+  function streamConnection(src, style) {
     const viewer = viewerRecord(src);
     if (!viewer) return null;
-    const mark = 'feed_style:"' + style + '"';
     for (const k in viewer) {
-      if (k.startsWith('__') && k.includes('news_feed') && k.includes(mark)) return deref(src, viewer[k]);
+      if (k.startsWith('__') && k.includes('news_feed') && k.includes(styleMark(style))) return deref(src, viewer[k]);
     }
     return null;
   }
 
-  function fetchPagesPosts(src) {
+  function fetchStream(src, st) {
     const state = mix;
     let relay = null;
     let query = null;
@@ -596,31 +628,32 @@
       relay = window.require('relay-runtime');
       query = window.require(FEED_QUERY + '.graphql');
     } catch (e) { /* handled below */ }
-    if (!relay || !query || typeof relay.fetchQuery !== 'function') { state.fails = MIX_MAX_FAILS; return; }
-    const conn = mixConnection(src, PAGES_STYLE);
+    if (!relay || !query || typeof relay.fetchQuery !== 'function') { st.fails = MIX_MAX_FAILS; return; }
+    const conn = streamConnection(src, st.style);
     const page = conn && deref(src, conn.page_info);
     const vars = {};
-    for (const k in state.vars) if (!k.startsWith('__relay_internal__')) vars[k] = state.vars[k];
-    vars.feedStyle = PAGES_STYLE;
-    vars.cursor = state.started && page && page.end_cursor ? page.end_cursor : null;   // null = from the newest post
+    for (const k in feedVars) if (!k.startsWith('__relay_internal__')) vars[k] = feedVars[k];
+    vars.feedStyle = st.style;
+    vars.orderby = ['MOST_RECENT'];
+    vars.cursor = st.started && page && page.end_cursor ? page.end_cursor : null;   // null = from the newest post
     vars.recentVPVs = [];
     try { vars.clientQueryId = crypto.randomUUID(); } catch (e) { /* keep the copied one */ }
-    state.busy = true;
-    state.lastAt = now();
-    const ticket = ++state.ticket;
+    st.busy = true;
+    st.lastAt = now();
+    const ticket = ++st.ticket;
     const finish = (ok) => {
-      if (!state.busy || state.ticket !== ticket) return;   // already settled, or a later request
-      state.busy = false;
-      state.lastAt = now();
-      if (ok) { state.started = true; state.fails = 0; } else { state.fails++; log('pages posts: request failed'); }
+      if (!st.busy || st.ticket !== ticket) return;   // already settled, or a later request
+      st.busy = false;
+      st.lastAt = now();
+      if (ok) { st.started = true; st.fails = 0; } else { st.fails++; log('my feed: request failed', st.style); }
       if (state === mix) setTimeout(mixTick, 0);
     };
     try {
       if (typeof relay.createOperationDescriptor === 'function' && typeof relayEnv.retain === 'function') {
         // Keeps the fetched posts in Facebook's store until they have been placed in the feed.
         const keep = relayEnv.retain(relay.createOperationDescriptor(query, vars));
-        if (state.retained) { try { state.retained.dispose(); } catch (e) { /* ignore */ } }
-        state.retained = keep;
+        if (st.retained) { try { st.retained.dispose(); } catch (e) { /* ignore */ } }
+        st.retained = keep;
       }
       relay.fetchQuery(relayEnv, query, vars, { networkCacheConfig: { force: true } })
         .subscribe({ complete: () => finish(true), error: () => finish(false) });
@@ -631,51 +664,57 @@
   }
 
   function mixTick() {
-    if (!mixing()) { stopMix(); return; }
+    if (!mixWanted()) { stopMix(); return; }
+    // Away from the home page the state is kept: Facebook keeps the feed too, and coming
+    // back should carry on where it was instead of fetching everything again.
+    if (!mixing()) return;
     const src = source();
     if (!src) return;
-    if (!mix) mix = { since: now(), vars: null, busy: false, ticket: 0, started: false, done: false, fails: 0, lastAt: 0, seen: new Set(), held: [], retained: null };
+    const host = hostConnection(src);
+    const hostRefs = host && host.edges && host.edges.__refs;
+    if (!hostRefs || !hostRefs.length) return;
+    if (mix && mix.placed.size && !hostRefs.some((id) => mix.placed.has(id))) stopMix();   // Facebook started the feed over
+    if (!mix) {
+      mix = { since: now(), run: 0, seen: new Set(), placed: new Set(), posts: new Set(),
+        streams: [newStream(FRIENDS_STYLE, false), newStream(PAGES_STYLE, true)] };
+    }
     hookFeedRequests();
-    const viewer = viewerRecord(src);
-    const friendsConn = mixConnection(src, FRIENDS_STYLE);
-    const friendRefs = friendsConn && friendsConn.edges && friendsConn.edges.__refs;
-    if (!viewer || !friendRefs || !friendRefs.length) return;
 
-    const timeOf = (edgeId) => {
+    const storyOf = (edgeId) => {
       const edge = edgeId != null ? src.get(edgeId) : null;
       const node = edge && deref(src, edge.node);
-      return node && node.__typename === 'Story' && node.creation_time > REAL_TIME ? node.creation_time : 0;
+      return node && node.__typename ? { edge, node } : null;
     };
+    const timeOf = (s) => (s && s.node.__typename === 'Story' && s.node.creation_time > REAL_TIME ? s.node.creation_time : 0);
+    // Facebook gives the same post a new story record on every fetch; post_id stays the same.
+    const postKey = (s) => (s.node.post_id != null ? 'p' + s.node.post_id : s.edge.node.__ref);
 
-    // New posts in the Pages feed: keep the ones that would be shown anyway.
-    const pagesConn = mix.started ? mixConnection(src, PAGES_STYLE) : null;
-    const pageRefs = (pagesConn && pagesConn.edges && pagesConn.edges.__refs) || [];
-    const inFeed = new Set();
-    for (const id of friendRefs) {
-      const edge = id != null ? src.get(id) : null;
-      if (edge && edge.node && edge.node.__ref) inFeed.add(edge.node.__ref);
-    }
-    let pagesOldest = 0;
-    for (const id of pageRefs) {
-      if (id == null) continue;
-      const t = timeOf(id);
-      if (t) pagesOldest = t;
-      if (mix.seen.has(id)) continue;
-      const edge = src.get(id);
-      const node = edge && deref(src, edge.node);
-      if (!node || !node.__typename) continue;   // still arriving
-      mix.seen.add(id);
-      if (!t || inFeed.has(edge.node.__ref) || !judge(src, node, edge).show) continue;
-      mix.held.push({ id, t });
+    const inFeed = new Set();   // posts the page's list already has
+    for (const id of hostRefs) {
+      const s = storyOf(id);
+      if (s) inFeed.add(postKey(s));
     }
 
-    // How far back the friends' posts loaded so far go.
-    let horizon = 0;
-    for (let i = friendRefs.length - 1; i >= 0 && !horizon; i--) {
-      if (!mix.seen.has(friendRefs[i])) horizon = timeOf(friendRefs[i]);
+    // Take in what the two feeds have delivered: keep the posts that would be shown.
+    for (const st of mix.streams) {
+      const conn = st.started ? streamConnection(src, st.style) : null;
+      const refs = (conn && conn.edges && conn.edges.__refs) || [];
+      for (const id of refs) {
+        if (id == null) continue;
+        const s = storyOf(id);
+        if (!s) continue;   // still arriving
+        const t = timeOf(s);
+        if (t) st.oldest = t;
+        if (mix.seen.has(id)) continue;
+        mix.seen.add(id);
+        const key = postKey(s);
+        if (!t || inFeed.has(key) || mix.posts.has(key) || !judge(src, s.node, s.edge).show) continue;
+        mix.posts.add(key);
+        st.queue.push({ id, t });
+      }
+      const page = conn && deref(src, conn.page_info);
+      if (st.started && !st.busy && page && page.has_next_page === false) st.done = true;
     }
-    const friendsPage = deref(src, friendsConn.page_info);
-    const friendsDone = !!friendsPage && friendsPage.has_next_page === false;
 
     let drawn = 0;   // feed entries already on the page
     for (const el of document.querySelectorAll('div[aria-posinset]')) {
@@ -683,59 +722,75 @@
       const pos = parseInt(el.getAttribute('aria-posinset'), 10);
       if (pos > drawn) drawn = pos;
     }
-
-    // Place every held post that is not older than the friends' posts loaded so far.
-    const ready = mix.held.filter((c) => friendsDone || !horizon || c.t >= horizon).sort((a, b) => b.t - a.t);
-    if (ready.length) {
-      const used = new Set();   // the ones that found a place this time
-      try {
-        const relay = window.require('relay-runtime');
-        const connId = friendsConn.__id;
-        relay.commitLocalUpdate(relayEnv, (store) => {
-          const conn = connId && store.get(connId);
-          const edges = conn && conn.getLinkedRecords('edges');
-          if (!edges) return;
-          const cut = Math.min(drawn, edges.length);
-          const merged = edges.slice(0, cut);
-          // Pages posts already in a row at the end of what is drawn.
-          let run = 0;
-          for (let i = cut - 1; i >= 0 && edges[i] && mix.seen.has(edges[i].getDataID()); i--) run++;
-          let next = 0;
-          let carry = Infinity;   // entries without a real time (ads) stay where they are
-          const place = () => {
-            const add = store.get(ready[next].id);
-            used.add(ready[next++].id);
-            if (add) { merged.push(add); run++; }
-          };
-          for (const rec of edges.slice(cut)) {
-            const id = rec ? rec.getDataID() : null;
-            if (id != null && mix.seen.has(id)) { merged.push(rec); run++; continue; }   // placed earlier
-            const real = id != null ? timeOf(id) : 0;
-            const t = real || carry;
-            carry = t;
-            while (next < ready.length && ready[next].t > t && run < MIX_MAX_RUN) place();
-            merged.push(rec);
-            if (real) run = 0;   // a friend's post; ads are invisible and do not break up a run
-          }
-          while (next < ready.length && (friendsDone || run < MIX_MAX_RUN)) place();
-          if (used.size) conn.setLinkedRecords(merged, 'edges');
-        });
-      } catch (e) {
-        log('pages posts: could not place them', e);
-        mix.fails = MIX_MAX_FAILS;
-      }
-      mix.held = mix.held.filter((c) => !used.has(c.id));
-      if (used.size) { log('pages posts placed:', used.size); scheduleAhead(0); }
+    const cut = Math.min(drawn, hostRefs.length);
+    const dropUnwanted = !settings.debug;   // "Show what is being hidden" needs them drawn
+    let waiting = 0;    // our posts placed but not drawn yet
+    let unwanted = 0;   // entries of Facebook's own mix that would only be hidden
+    for (let i = cut; i < hostRefs.length; i++) {
+      const id = hostRefs[i];
+      if (mix.placed.has(id)) { waiting++; continue; }
+      const s = storyOf(id);
+      if (dropUnwanted && s && !judge(src, s.node, s.edge).show) unwanted++;
     }
 
-    // Ask for more Pages posts while they have not caught up with the friends' posts.
-    if (mix.busy || mix.done || mix.fails >= MIX_MAX_FAILS || !mix.vars) return;
-    if (now() - mix.lastAt < (mix.fails ? MIX_RETRY_MS : MIX_GAP_MS)) return;
-    const pagesPage = pagesConn && deref(src, pagesConn.page_info);
-    if (mix.started && pagesPage && pagesPage.has_next_page === false) { mix.done = true; return; }
-    const backlog = Math.max(0, friendRefs.length - drawn) + mix.held.length;
-    const behind = friendsDone || !pagesOldest || !horizon || pagesOldest >= horizon;
-    if (!mix.started || (behind && backlog < MIX_BACKLOG)) fetchPagesPosts(src);
+    // Next posts: the newer of what the two feeds have in hand, each feed newest first.
+    // Nothing waits for the other feed to catch up (only for its first answer), so the
+    // order across the two is close to, not exactly, by time; speed matters more here.
+    const friends = mix.streams[0];
+    const pages = mix.streams[1];
+    const picks = [];
+    const bothAnswered = mix.streams.every((st) => st.started || streamOver(st));
+    while (bothAnswered && waiting + picks.length < MIX_BACKLOG) {
+      const f = friends.queue[0];
+      const p = pages.queue[0];
+      let takePage;
+      if (f && p) takePage = p.t > f.t && mix.run < MIX_MAX_RUN;
+      else if (f) takePage = false;
+      else if (p && (mix.run < MIX_MAX_RUN || streamOver(friends))) takePage = true;
+      else break;
+      if (takePage) { picks.push(pages.queue.shift()); mix.run++; } else { picks.push(friends.queue.shift()); mix.run = 0; }
+    }
+
+    if (picks.length || unwanted) {
+      try {
+        const relay = window.require('relay-runtime');
+        const hostId = host.__id;
+        relay.commitLocalUpdate(relayEnv, (store) => {
+          const conn = hostId && store.get(hostId);
+          const edges = conn && conn.getLinkedRecords('edges');
+          if (!edges) return;
+          const at = Math.min(drawn, edges.length);
+          const ours = [];
+          const theirs = [];
+          for (const rec of edges.slice(at)) {
+            const id = rec ? rec.getDataID() : null;
+            if (id != null && mix.placed.has(id)) { ours.push(rec); continue; }
+            const s = id != null ? storyOf(id) : null;
+            if (dropUnwanted && s && !judge(src, s.node, s.edge).show) continue;   // would only be hidden: never draw it
+            theirs.push(rec);
+          }
+          for (const c of picks) {
+            const add = store.get(c.id);
+            if (add) { ours.push(add); mix.placed.add(c.id); }
+          }
+          // Ours first, then whatever of Facebook's own mix is still wanted or still arriving.
+          conn.setLinkedRecords(edges.slice(0, at).concat(ours, theirs), 'edges');
+        });
+        log('my feed: placed', picks.length, 'dropped', unwanted);
+        if (picks.length) scheduleAhead(0);
+      } catch (e) {
+        log('my feed: could not place posts', e);
+        for (const st of mix.streams) st.fails = MIX_MAX_FAILS;
+      }
+    }
+
+    // Keep a few posts in hand from each feed.
+    if (!feedVars) return;
+    for (const st of mix.streams) {
+      if (st.busy || streamOver(st) || st.queue.length >= MIX_QUEUE) continue;
+      if (now() - st.lastAt < (st.fails ? MIX_RETRY_MS : MIX_GAP_MS)) continue;
+      fetchStream(src, st);
+    }
   }
 
   /* ---------------- Loading ahead ---------------- */
@@ -799,7 +854,7 @@
     }
     // The combined feed copies the settings of Facebook's own "load more" request, so until
     // one has gone out (and for a short while only) keep loading even with enough posts ready.
-    const wantRequest = !!mix && !mix.vars && now() - mix.since < MIX_WAIT_MS;
+    const wantRequest = !!mix && !feedVars && now() - mix.since < MIX_WAIT_MS;
     if (!marker || (ready >= AHEAD_POSTS && !wantRequest) || past >= AHEAD_MAX_ENTRIES || now() < pullPausedUntil) { stopPull(); return; }
     if (pullEl !== marker) {
       stopPull();
@@ -1647,7 +1702,7 @@
     else { html.removeAttribute('data-ffo-home-init'); setFlag('data-ffo-strict', false); firstPostAt = 0; }
     if (!isReel) { reelEmpty = false; blockReel(false); }
     if (!isHome) stopPull();
-    if (!mixing()) stopMix();
+    if (!mixWanted()) stopMix();
   }
 
   function onUrl() {

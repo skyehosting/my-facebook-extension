@@ -6,7 +6,8 @@ const DEFAULTS = {
   reelsMode: 'following',   // 'friends' | 'following' | 'all'
   hideSideAds: true,
   loadAhead: true,          // keep a few approved posts loaded below the screen
-  homeFeed: 'main',         // what facebook.com opens: 'main' | 'both' | 'friends' | 'pages'
+  homeFeed: 'mine',         // what facebook.com shows: 'mine' | 'main' | 'friends' | 'pages'
+  feedV: 2,                 // marks settings saved since 'mine' exists
   checkUpdates: true,      // ask GitHub once a day whether a newer version exists
   autoReload: true,         // load a new version by itself once the updater has installed it
   debug: false
@@ -28,8 +29,8 @@ const REEL_HINTS = {
   all: 'Facebook\'s normal reels, including "For you" and the Reels shelf in your feed.'
 };
 const FEED_HINTS = {
-  main: "Facebook's own mix. Most of it gets filtered out here, so posts arrive slowly.",
-  both: "Friends' posts and Pages you follow in one list, newest first. Loads several times faster than Main.",
+  mine: "Your home page, filled with friends' posts and Pages you follow, newest first. Loads fastest.",
+  main: "Facebook's own ranked mix. Most of it gets filtered out here, so posts arrive slowly.",
   friends: "Facebook's Friends feed: only friends' posts, newest first. Loads several times faster.",
   pages: "Facebook's Pages feed: only Pages you follow, newest first. Loads several times faster."
 };
@@ -86,7 +87,9 @@ function checkForUpdate(force) {
 function normalize(raw) {
   const s = Object.assign({}, DEFAULTS, raw);
   if (!['friends', 'following', 'all'].includes(s.reelsMode)) s.reelsMode = 'following';
-  if (!['main', 'both', 'friends', 'pages'].includes(s.homeFeed)) s.homeFeed = 'main';
+  if (!['mine', 'main', 'friends', 'pages'].includes(s.homeFeed)) s.homeFeed = 'mine';
+  if (raw && raw.feedV !== 2 && s.homeFeed === 'main') s.homeFeed = 'mine';   // 'main' was only the old default
+  s.feedV = 2;
   if (raw && raw.reelsMode == null && raw.reelsFollowingOnly === false) s.reelsMode = 'all';
   delete s.reelsFollowingOnly;
   delete s.filterReelShelf;

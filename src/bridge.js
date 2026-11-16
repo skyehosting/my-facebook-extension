@@ -13,7 +13,8 @@
     reelsMode: 'following',   // 'friends' | 'following' | 'all'
     hideSideAds: true,
     loadAhead: true,          // keep a few approved posts loaded below the screen
-    homeFeed: 'main',         // what facebook.com opens: 'main' | 'both' | 'friends' | 'pages'
+    homeFeed: 'mine',         // what facebook.com shows: 'mine' | 'main' | 'friends' | 'pages'
+    feedV: 2,                 // marks settings saved since 'mine' exists
     checkUpdates: true,      // ask GitHub once a day whether a newer version exists
     autoReload: true,         // load a new version by itself once the updater has installed it
     debug: false
@@ -25,7 +26,9 @@
   function normalize(raw) {
     const s = Object.assign({}, DEFAULTS, raw);
     if (!['friends', 'following', 'all'].includes(s.reelsMode)) s.reelsMode = 'following';
-    if (!['main', 'both', 'friends', 'pages'].includes(s.homeFeed)) s.homeFeed = 'main';
+    if (!['mine', 'main', 'friends', 'pages'].includes(s.homeFeed)) s.homeFeed = 'mine';
+    if (raw && raw.feedV !== 2 && s.homeFeed === 'main') s.homeFeed = 'mine';   // 'main' was only the old default
+    s.feedV = 2;
     if (raw && raw.reelsMode == null && raw.reelsFollowingOnly === false) s.reelsMode = 'all';
     delete s.reelsFollowingOnly;
     delete s.filterReelShelf;
