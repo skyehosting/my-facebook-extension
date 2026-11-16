@@ -23,6 +23,33 @@ html[data-ffo-home]:not([data-ffo-debug]) div[aria-posinset][data-ffo="hide"] {
   pointer-events: none !important;
 }
 
+/* A post that was judged and removed is not laid out at all, which saves the browser
+   the work of rendering something nobody will see. */
+html[data-ffo-home]:not([data-ffo-debug]) div[aria-posinset][data-ffo="hide"] {
+  content-visibility: hidden !important;
+}
+
+/* The wrappers around a removed post carry the spacing between posts. Without this,
+   every removed post leaves 12px behind and a run of them adds up to a visible gap. */
+html[data-ffo-home]:not([data-ffo-debug]) [data-ffo-wrap] {
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  min-height: 0 !important;
+}
+
+/* Loading ahead: the empty marker Facebook watches to decide when to load more posts
+   is held inside the viewport, invisibly, while more posts are wanted (see main.js). */
+html[data-ffo-home] [data-ffo-pull] {
+  position: fixed !important;
+  top: 50% !important;
+  left: 0 !important;
+  width: 1px !important;
+  height: 1px !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
 /* Single cards inside a Reels shelf, right-rail ads, the reels "For you" tab. */
 html[data-ffo-on] [data-ffo-card="hide"],
 html[data-ffo-on] [data-ffo-hidden] {

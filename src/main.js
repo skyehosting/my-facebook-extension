@@ -34,7 +34,8 @@
     showGroups: false,        // posts from groups you joined, written by non-friends
     reelsMode: 'following',   // whose reels to show: 'friends' | 'following' (friends + followed) | 'all'
     hideSideAds: true,        // "Sponsored" block in the right-hand column
-    debug: false              // show hidden posts dimmed with the reason, log to console
+    loadAhead: true,          // keep a few approved posts loaded below the screen
+    debug: false            // show hidden posts dimmed with the reason, log to console
   };
 
   function normalize(raw) {
@@ -411,9 +412,25 @@
     }
   }
 
+  // A feed entry is a post inside a stack of single-child wrappers, one of which carries
+  // the spacing between posts. Marking them lets a hidden post take up no room at all;
+  // otherwise every hidden post leaves that spacing behind and they add up to a gap.
+  const WRAP_LEVELS = 12;
+  function markWrappers(post, hidden) {
+    let el = post;
+    for (let i = 0; i < WRAP_LEVELS; i++) {
+      const parent = el.parentElement;
+      if (!parent || parent.children.length !== 1 || parent.hasAttribute('role') || parent === document.body) break;
+      el = parent;
+      if (hidden) { if (!el.hasAttribute('data-ffo-wrap')) el.setAttribute('data-ffo-wrap', ''); }
+      else if (el.hasAttribute('data-ffo-wrap')) el.removeAttribute('data-ffo-wrap');
+    }
+  }
+
   function applyVerdict(el, v, pos) {
     const val = v.show ? 'show' : 'hide';
     if (el.getAttribute('data-ffo') !== val) el.setAttribute('data-ffo', val);
+    markWrappers(el, !v.show);
     if ((el.getAttribute('data-ffo-reason') || '') !== v.reason) el.setAttribute('data-ffo-reason', v.reason);
     if (v.shelf) filterShelfCards(el, v.shelf);
     postCache.set(el, { pos, validated: !!v.validated, shelf: !!v.shelf, actor: v.actor || null });
@@ -470,12 +487,15 @@
   }
 
   function clearFeedMarks() {
-    for (const el of document.querySelectorAll('[data-ffo], [data-ffo-card], [data-ffo-hidden]')) {
+    for (const el of document.querySelectorAll('[data-ffo], [data-ffo-card], [data-ffo-hidden], [data-ffo-wrap], [data-ffo-pull]')) {
       el.removeAttribute('data-ffo');
       el.removeAttribute('data-ffo-reason');
       el.removeAttribute('data-ffo-card');
       el.removeAttribute('data-ffo-hidden');
+      el.removeAttribute('data-ffo-wrap');
+      el.removeAttribute('data-ffo-pull');
     }
+    pullEl = null;
   }
 
   function queueStats() {
@@ -489,6 +509,81 @@
       }
       toBridge('stats', { stats });
     }, 600);
+  }
+
+  /* ---------------- Loading ahead ---------------- */
+  // Facebook sends the feed a few stories at a time, about one a second, and only asks
+  // for more when an empty marker element after the last post comes on screen. With most
+  // stories filtered out, that means a wait after nearly every post. So while fewer than
+  // AHEAD_POSTS approved posts are waiting below the screen, the marker is pinned inside
+  // the viewport (invisibly), which makes Facebook keep loading in the background.
+
+  const AHEAD_POSTS = 8;         // approved posts to keep ready below the screen
+  const AHEAD_MAX_ENTRIES = 100; // never run further than this many feed entries past the screen
+  const AHEAD_STALL_MS = 12000;  // marker pinned this long with nothing arriving: stop for a while
+  const AHEAD_PAUSE_MS = 20000;
+  let pullEl = null;             // the marker currently pinned
+  let pullAt = 0;
+  let pullPausedUntil = 0;
+  let aheadTimer = 0;
+
+  function stopPull() {
+    if (pullEl) { pullEl.removeAttribute('data-ffo-pull'); pullEl = null; }
+  }
+
+  function scheduleAhead(delay) {
+    if (aheadTimer || !isHome || !settings.loadAhead) return;
+    aheadTimer = setTimeout(() => { aheadTimer = 0; loadAhead(); }, delay == null ? 250 : delay);
+  }
+
+  // The element whose children are the feed's entries, found from the last post.
+  function feedList() {
+    const posts = document.querySelectorAll('div[aria-posinset]');
+    let el = posts[posts.length - 1];
+    if (!el) return null;
+    const outer = el.parentElement && el.parentElement.closest('[aria-posinset]');
+    if (outer) el = outer;   // the last match was a list inside a post
+    for (let i = 0; i < WRAP_LEVELS && el.parentElement && el.parentElement.children.length === 1; i++) el = el.parentElement;
+    const list = el.parentElement;
+    return list && list !== document.body && list.children.length > 1 ? list : null;
+  }
+
+  function loadAhead() {
+    if (!isHome || !settings.loadAhead || document.visibilityState !== 'visible') { stopPull(); return; }
+    const list = feedList();
+    if (!list) { stopPull(); return; }
+    const bottom = window.innerHeight;
+    let marker = null;
+    let seenPost = false;
+    let ready = 0;
+    let past = 0;
+    for (let i = list.children.length - 1; i >= 0; i--) {
+      const entry = list.children[i];
+      if (!entry.firstElementChild) {
+        if (!seenPost) marker = entry;   // ends up as the first empty element after the last post
+        continue;
+      }
+      const post = entry.querySelector('div[aria-posinset]');
+      if (!post) continue;               // the "Loading..." placeholder at the end
+      seenPost = true;
+      if (post.getBoundingClientRect().top <= bottom) break;
+      past++;
+      if (post.getAttribute('data-ffo') === 'show') ready++;
+    }
+    if (!marker || ready >= AHEAD_POSTS || past >= AHEAD_MAX_ENTRIES || now() < pullPausedUntil) { stopPull(); return; }
+    if (pullEl !== marker) {
+      stopPull();
+      marker.setAttribute('data-ffo-pull', '');
+      pullEl = marker;
+      pullAt = now();
+    } else if (now() - pullAt > AHEAD_STALL_MS) {
+      // Nothing came (end of the feed, or offline). Let go and try again later.
+      stopPull();
+      pullPausedUntil = now() + AHEAD_PAUSE_MS;
+      log('load ahead: nothing arrived, pausing');
+      return;
+    }
+    scheduleAhead(400);
   }
 
   /* Right-hand column "Sponsored" block */
@@ -1308,6 +1403,7 @@
     if (isHome) { if (!html.hasAttribute('data-ffo-home-init')) { html.setAttribute('data-ffo-home-init', ''); setFlag('data-ffo-strict', true); } }
     else { html.removeAttribute('data-ffo-home-init'); setFlag('data-ffo-strict', false); firstPostAt = 0; }
     if (!isReel) { reelEmpty = false; blockReel(false); }
+    if (!isHome) stopPull();
   }
 
   function onUrl() {
@@ -1368,6 +1464,15 @@
       }
       todo.forEach(classify);
       scheduleSideAds();
+      if (pullEl && (!pullEl.isConnected || pullEl.firstElementChild)) {
+        // Facebook used up the pinned marker: let go of it and pin the next one promptly.
+        stopPull();
+        clearTimeout(aheadTimer);
+        aheadTimer = 0;
+        scheduleAhead(60);
+      } else {
+        scheduleAhead();
+      }
       if (menuIsOpen()) {
         // The page changed while a post's "..." menu is open: put our entry in (or back)
         // right away rather than on the next timer tick.
@@ -1412,6 +1517,8 @@
     updatePage();
     if (isHome) rescanFeed();
     if (isReel) reelTick();
+    pullPausedUntil = 0;
+    loadAhead();
   }
 
   window.addEventListener('message', (ev) => {
@@ -1575,5 +1682,9 @@
     try { onUrl(); } catch (e) { /* ignore */ }
     if (isReel) scheduleReelTick(0);
     if (isHome && pendingFollow.length) processPendingFollows();
+    if (isHome) scheduleAhead();
   }, 1000);
+  // Scrolling uses up the posts that were loaded ahead; coming back to the tab resumes loading.
+  window.addEventListener('scroll', () => { if (isHome) scheduleAhead(); }, { passive: true, capture: true });
+  document.addEventListener('visibilitychange', () => { if (isHome) { pullPausedUntil = 0; scheduleAhead(0); } });
 })();

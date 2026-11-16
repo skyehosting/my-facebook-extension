@@ -3,6 +3,7 @@
 A browser extension for Brave, Chrome and other Chromium browsers that turns facebook.com back into a feed of people you chose to see.
 
 - **Home feed:** only posts from friends and accounts you follow. Ads, "Suggested for you" posts, the Reels shelf, "People you may know" and group suggestions are removed before they are drawn.
+- **Loads ahead:** Facebook sends the feed a few stories at a time and most of them get filtered out, so the extension keeps a few of your posts loaded below the screen. Can be turned off in the popup.
 - **Reels:** choose whose reels you get: friends only, friends plus accounts you follow, or everything. Reels you have seen are replayed newest first in a loop when there is nothing new.
 - **Unfollow from the post menu:** each post's "..." menu gets an Unfollow / Follow again entry.
 - **Updates:** the extension checks this page once a day and tells you when a newer version exists.

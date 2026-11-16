@@ -12,7 +12,8 @@
     showGroups: false,
     reelsMode: 'following',   // 'friends' | 'following' | 'all'
     hideSideAds: true,
-    checkUpdates: true,       // ask GitHub once a day whether a newer version exists
+    loadAhead: true,          // keep a few approved posts loaded below the screen
+    checkUpdates: true,      // ask GitHub once a day whether a newer version exists
     autoReload: true,         // load a new version by itself once the updater has installed it
     debug: false
   };
