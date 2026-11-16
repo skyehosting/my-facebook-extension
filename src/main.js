@@ -18,9 +18,12 @@
  *                 newest first, in a loop, once Facebook has nothing new to serve.
  *  - Reels mode:  'following' (friends + followed, the default), 'friends' (only
  *                 people on your synced friends list) or 'all' (leave reels alone).
- *  - Reel viewer: playback is kept on Facebook's own "Following" reel feed
- *                 (newest first), anything else is skipped unseen, and the
- *                 feed restarts from the newest reel when it runs out.
+ *  - Reel viewer: playback is kept on Facebook's own "Following" reel feed. The list
+ *                 that feed plays from is cleaned and filled ahead of the viewer:
+ *                 unwanted reels are taken out before they are reached, more of the
+ *                 feed is fetched in the background, and the remembered reels are added
+ *                 to the same list when there is nothing new (see "Reel queue"). If
+ *                 that cannot work, unwanted reels are clicked past one at a time.
  */
 (() => {
   'use strict';
@@ -95,6 +98,7 @@
         if (typeof window.require !== 'function') return null;
         relayEnv = window.require('CometRelayEnvironment');
         hookFeedRequests();   // as early as possible, so Facebook's first "load more" request is seen
+        hookStore();
       }
       return relayEnv.getStore().getSource();
     } catch (e) {
@@ -622,9 +626,36 @@
         if (params && params.name === FEED_QUERY && vars && vars.feedStyle !== FRIENDS_STYLE && vars.feedStyle !== PAGES_STYLE) {
           rememberFeedVars(vars);
         }
+        if (params && params.name === FOLLOWING_QUERY && vars && !rqOwn) {
+          // Facebook's own "more reels" request: its settings, and that one is on its way.
+          followingVars = vars;
+          fbReelPage = { cursor: vars.cursor, at: now() };
+        }
       } catch (e) { /* never get in the way of the page's own request */ }
       return original.apply(this, arguments);
     };
+  }
+
+  // Facebook's store says "something changed" through this. The reel viewer's list is
+  // looked at right then, so unwanted reels are gone before the viewer draws them.
+  function hookStore() {
+    try {
+      const store = relayEnv.getStore();
+      if (!store || typeof store.notify !== 'function' || store.__ffoHooked) return;
+      store.__ffoHooked = true;
+      const original = store.notify;
+      store.notify = function () {
+        const result = original.apply(this, arguments);
+        if (isReel && !rqSoon) {
+          rqSoon = true;
+          queueMicrotask(() => {
+            rqSoon = false;
+            try { reelQueueTick(); } catch (e) { log('reel queue failed', e); }
+          });
+        }
+        return result;
+      };
+    } catch (e) { /* the timer-driven check still runs */ }
   }
 
   // The list the page draws from (Facebook's own feed), and the two fetched for filling it.
@@ -1305,7 +1336,7 @@
           noticeTimer = 0;
           if (!html.hasAttribute('data-ffo-reel-block') || reelEmpty) return;
           notice(friendsOnly() ? 'Looking for reels from your friends...' : 'Looking for reels from accounts you follow...');
-        }, 800);
+        }, 2500);
       }
     } else {
       clearTimeout(noticeTimer);
@@ -1329,7 +1360,20 @@
   // The feed ran out. Normally: start over from the newest reel. If the whole pass had
   // nothing to show (likely in friends-only mode), try one more batch, then say so and
   // stop instead of reloading forever.
-  function endOfFeed() {
+  function endOfFeed(asked) {
+    if (rq && rq.lined > 0 && playlist().length >= RQ_MIN_LOOP) {
+      // The remembered reels were part of the list and all of it has been played. Starting
+      // over reloads the viewer, and with it goes the way back up through what was watched,
+      // so it only happens on a second scroll down; until then scrolling up still works.
+      if (asked === false) return;   // a timer, not the user
+      const since = now() - rq.endAskedAt;
+      if (since > RQ_AGAIN_MIN && since < RQ_AGAIN_MAX) { restartFollowing('Back to the newest reel'); return; }
+      if (since >= RQ_AGAIN_MAX) {
+        rq.endAskedAt = now();
+        toast('That was the last reel. Scroll down again to start over from the newest.', 6000);
+      }
+      return;
+    }
     if (startReplay()) return;   // nothing new left: loop over the remembered reels
     if (shownThisPass > 0) { restartFollowing('End of your reels - back to the newest'); return; }
     let rec = { t: 0, n: 0 };
@@ -1401,6 +1445,8 @@
   function atEnd(lenient) {
     const next = cardButton(1);
     watchNextButton();
+    if (rqCanSupply()) return false;   // more reels are on their way into the list
+    if (rq && rq.on && rq.atLast) return true;   // the queue has nothing more to add after this one
     if (nextStuckOff()) return true;
     const src = source();
     const id = reelId();
@@ -1417,7 +1463,7 @@
     const href = location.href;
     endTimer = setTimeout(() => {
       if (!isReel || reelGiveUp || location.href !== href || followingMode() !== true) return;
-      if (atEnd(true)) endOfFeed();
+      if (atEnd(true)) endOfFeed(false);
     }, 3500);
   }
 
@@ -1437,6 +1483,569 @@
     // Out of reels: "Next" has stayed disabled, or nothing has moved for several seconds.
     if (nextStuckOff() || now() - skipStart > 7000) { skipId = null; endOfFeed(); return; }
     scheduleReelTick(200);
+  }
+
+  /* ---- Reel queue: Facebook's own reel list, cleaned and filled ahead of the viewer ---- */
+  // The Following viewer plays from a list in Facebook's store that grows five reels at a
+  // time, and much of it can be unwanted: ads, accounts unfollowed here, non-friends in
+  // friends-only mode, reels listed twice. Clicking past those one at a time is slow and
+  // shows (a blank player, a "Looking for reels" message). So the part of the list after
+  // the reel on screen is rewritten before the viewer gets there:
+  //   - unwanted and repeated reels are taken out,
+  //   - more of the feed is requested in the background until RQ_AHEAD good reels wait,
+  //   - when the feed has nothing new, the remembered reels (see "Replay list") are loaded
+  //     and added to the same list, so they scroll exactly like new ones.
+  // The viewer shows whatever is at its position in the list, so nothing before the reel
+  // on screen is ever removed or moved: that part is the history, and scrolling up always
+  // goes back through it, one reel at a time. The one exception is an unwanted reel that
+  // is itself on screen: taking it out puts the next good one there.
+  // The list ends when every remembered reel has been played. The viewer does not show a
+  // reel twice in one list, so going round again needs a fresh list, which means a fresh
+  // history: that is only done when asked for with a second scroll (see endOfFeed).
+
+  const RQ_AHEAD = 10;            // good reels kept waiting after the one on screen
+  const RQ_PAGE = 10;             // feed entries asked for per request (Facebook itself asks for 5)
+  const RQ_RESERVE = 3;           // remembered reels lined up while the feed is still being searched
+  const RQ_GRACE = 300;           // ...but not before the feed has had this long to offer a new reel first
+  const RQ_DRY_MAX = 150;         // unwanted feed entries in a row before the feed is given up on
+  const RQ_MAX_FAILS = 3;
+  const RQ_STORY_PARALLEL = 2;    // remembered reels loaded at the same time (one more when few are waiting)
+  const RQ_WARM = 4;              // remembered reels loaded ahead of time on the home page
+  const RQ_WARM_DELAY = 5000;     // ...this long after the home page opened
+  const RQ_STORY_MAX_AGE = 30 * 60000;   // a loaded reel's video addresses do not stay valid forever
+  const RQ_MIN_LOOP = 4;          // fewer remembered reels than this: the old one-by-one replay loops them
+  const RQ_AGAIN_MIN = 1500;      // a second scroll at the end counts as "start over" after this long...
+  const RQ_AGAIN_MAX = 15000;     // ...and up to this long after the first
+  const RQ_EDGE = 'client:ffo:reel:';
+  const FOLLOWING_QUERY = 'FBUnifiedVideoFollowingPaginationQuery';
+  const REEL_ROOT_QUERY = 'FBUnifiedVideoRootWithEntrypointQuery';
+  const REEL_SEEN_MUTATION = 'FBUnifiedVideoSeenStateMutation';
+
+  let rq = null;                  // the queue's state while a Following viewer is open
+  let rqSoon = false;             // a look at the list is already scheduled (see hookStore)
+  let rqOwn = false;              // true while the extension itself sends a "more reels" request
+  let rqBroken = false;           // Facebook's pieces were not where expected: the old skipping is used
+  let rqMissingSince = 0;
+  let followingVars = null;       // settings of Facebook's own latest "more reels" request
+  let fbReelPage = null;          // { cursor, at } of that request
+  const reelStories = new Map();  // reel id -> { state: 'busy' | 'ready' | 'failed' | 'gone', at, story, keep, tries }
+  let storyBusy = 0;
+  let storyFails = 0;             // failures in a row
+  let storyDrops = 0;             // remembered reels found deleted since the page loaded
+  const reelSeenSent = new Set();
+  let reelSeenOut = [];
+  let reelSeenTimer = 0;
+  let reelSeenCount = 0;
+  let warmWant = 0;               // remembered reels to have loaded before the viewer is open
+  let warmTimer = 0;
+  let warmTries = 0;
+  let warmAt = 0;
+
+  const newQueue = (connId) => ({
+    conn: connId, on: false, cur: -1, len: 0, lostSince: 0, atLast: false, since: now(),
+    pageBusy: false, pageTicket: 0, pageFails: 0, pageAt: 0, feedOff: false, feedDone: false, dry: 0,
+    counted: new Set(),           // feed entries already judged once (for `dry` and the replay list)
+    libList: null, libPos: 0, libDone: false, lined: 0, endAskedAt: 0,
+    saidCaughtUp: false, waitToastAt: 0
+  });
+
+  function dropQueue() {
+    rq = null;
+    rqMissingSince = 0;
+  }
+
+  function rqTools() {
+    try {
+      const relay = window.require('relay-runtime');
+      const page = window.require(FOLLOWING_QUERY + '.graphql');
+      if (!relay || !page || typeof relay.fetchQuery !== 'function' || typeof relay.commitLocalUpdate !== 'function') return null;
+      return { relay, page };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // The list the Following viewer draws from: { conn, key }.
+  function followingConn(src) {
+    const viewer = viewerRecord(src);
+    if (!viewer) return null;
+    let best = null;
+    for (const k in viewer) {
+      if (!k.startsWith('__') || !k.includes('video_feed_unit_feed') || !/following/i.test(k)) continue;
+      const conn = deref(src, viewer[k]);
+      const refs = conn && conn.edges && conn.edges.__refs;
+      if (refs && (!best || refs.length > best.conn.edges.__refs.length)) best = { conn, key: k };
+    }
+    return best;
+  }
+
+  function reelEdgeInfo(src, ref) {
+    const edge = ref != null ? src.get(ref) : null;
+    const story = edge && deref(src, edge.node);
+    if (!story) return null;
+    const att = derefs(src, field(story, 'attachments'))[0];
+    const media = att && deref(src, att.media);
+    return {
+      ref,
+      id: media && media.id ? String(media.id) : storyVideoId(src, story),
+      owner: media ? deref(src, media.owner) : null,
+      ad: story.sponsored_data != null,
+      time: story.creation_time,
+      ours: String(ref).startsWith(RQ_EDGE)
+    };
+  }
+
+  // 'show', or why not: 'ad', 'hidden' (an account unfollowed here), 'other'.
+  // Same rules as reelStatus() applies to the reel on screen in the Following feed.
+  function reelVerdict(info) {
+    if (info.ad) return 'ad';
+    const owner = info.owner;
+    if (!owner) return friendsOnly() ? 'other' : 'show';
+    if (isHidden(owner)) return 'hidden';
+    if (friendsOnly()) return isFriend(owner) ? 'show' : 'other';
+    if (isMine(owner)) return 'show';
+    return owner.subscribe_status === 'CAN_SUBSCRIBE' ? 'other' : 'show';
+  }
+
+  function writeReelList(tools, connId, want) {
+    try {
+      tools.relay.commitLocalUpdate(relayEnv, (store) => {
+        const conn = store.get(connId);
+        if (!conn) return;
+        const out = [];
+        for (const ref of want) {
+          const edge = store.get(ref);
+          if (edge) out.push(edge);
+        }
+        conn.setLinkedRecords(out, 'edges');
+      });
+      return true;
+    } catch (e) {
+      log('reel queue: could not write the list', e);
+      return false;
+    }
+  }
+
+  // Facebook marks a reel as seen when the viewer leaves it, and its Following feed keeps
+  // offering reels that are not marked. Reels from accounts unfollowed here used to get
+  // marked while they were clicked past; now that they are taken out unseen they are marked
+  // directly, or the same ones would head the feed on every visit. Only those: reels that
+  // are merely outside the current "Reels from" choice stay new.
+  function markReelSeen(id) {
+    if (!id || reelSeenSent.has(id)) return;
+    reelSeenSent.add(id);
+    reelSeenOut.push(id);
+    if (!reelSeenTimer) reelSeenTimer = setTimeout(sendReelSeen, 1500);
+  }
+  function sendReelSeen() {
+    reelSeenTimer = 0;
+    const ids = reelSeenOut.splice(0, 10);
+    if (!ids.length) return;
+    try {
+      const relay = window.require('relay-runtime');
+      const mutation = window.require(REEL_SEEN_MUTATION + '.graphql');
+      const actor = viewerId();
+      if (relay && mutation && actor && typeof relay.commitMutation === 'function') {
+        relay.commitMutation(relayEnv, {
+          mutation,
+          variables: { input: { video_ids: ids, actor_id: actor, client_mutation_id: 'ffo' + (++reelSeenCount) } },
+          onError: () => { /* not worth retrying */ }
+        });
+      }
+    } catch (e) { /* Facebook's viewer code is not there: nothing to mark with */ }
+    if (reelSeenOut.length) reelSeenTimer = setTimeout(sendReelSeen, 1500);
+  }
+
+  const reelScale = () => (followingVars && followingVars.scale) || (feedVars && feedVars.scale) || 1;
+
+  // Ask for the next stretch of the Following feed, the way the viewer itself does.
+  function fetchReelPage(tools, found, cursor) {
+    const q = rq;
+    let base = followingVars;
+    if (!base) {
+      // Facebook's own request has not been seen: the list's name carries the same settings.
+      const m = found.key.match(/video_feed_context_data:(\{.*\})\)$/);
+      let context = null;
+      try { context = m ? JSON.parse(m[1]) : null; } catch (e) { /* handled below */ }
+      if (!context) { q.pageFails = RQ_MAX_FAILS; return; }
+      base = { scale: reelScale(), should_use_stream: true, stream_initial_count: 1, useDefaultActor: false, video_feed_context_data: context };
+    }
+    const vars = {};
+    for (const k in base) if (!k.startsWith('__relay_internal__')) vars[k] = base[k];
+    vars.count = RQ_PAGE;
+    vars.cursor = cursor;
+    q.pageBusy = true;
+    q.pageAt = now();
+    const ticket = ++q.pageTicket;
+    const done = (ok) => {
+      if (q !== rq || !q.pageBusy || q.pageTicket !== ticket) return;
+      q.pageBusy = false;
+      q.pageAt = now();
+      if (ok) {
+        // An answer that did not move the feed along counts as a failure, or it would be asked for again at once.
+        const src = source();
+        const conn = src && src.get(q.conn);
+        const page = conn && deref(src, conn.page_info);
+        if (page && page.end_cursor === cursor && page.has_next_page !== false) ok = false;
+      }
+      if (ok) q.pageFails = 0; else { q.pageFails++; log('reel queue: feed request failed'); }
+      scheduleReelTick(ok ? 0 : 1200);
+    };
+    try {
+      rqOwn = true;
+      tools.relay.fetchQuery(relayEnv, tools.page, vars, { networkCacheConfig: { force: true } })
+        .subscribe({ complete: () => done(true), error: () => done(false) });
+    } catch (e) {
+      done(false);
+    } finally {
+      rqOwn = false;
+    }
+    setTimeout(() => done(false), 20000);
+  }
+
+  // The request Facebook sends when one specific reel is opened.
+  function reelRootVars(id) {
+    return {
+      count: 1, initial_node_id: id, isAggregationProfileViewerOrShouldShowReelsForPage: false, page_id: '',
+      root_video_id: id, scale: reelScale(), should_include_comet_reels_seo_llm_content: false,
+      should_use_stream: true, shouldIncludeInitialNodeFetch: true, shouldShowReelsForPage: false,
+      shouldShowReelsForUser: false, stream_initial_count: 0, useDefaultActor: false, user_id: '',
+      video_feed_context_data: {
+        arltw_feed_section_type: 'FB_SHORTS_CHAINING', in_session_watched_video: null, is_async_ads_enabled: true,
+        is_async_ads_headload_coupling_enabled: true, player_behavior: 'UNIFIED_PLAYER_VDD',
+        real_time_ranking_context_data: { recent_vpvs_v2: [] }, request_type: 'NORMAL', seed_video_id: id,
+        shorts_search_params: {}, surface_type: 'FEED_VIDEO_DEEP_DIVE', tracking_code: '',
+        video_channel_entry_point: 'NEWSFEED'
+      }
+    };
+  }
+
+  const storyUsable = (st) => !!st && st.state === 'ready' && now() - st.at < RQ_STORY_MAX_AGE;
+
+  // Load one remembered reel into Facebook's store. False when Facebook's reel code is not loaded.
+  function fetchReelStory(id) {
+    let relay = null;
+    let query = null;
+    try {
+      relay = window.require('relay-runtime');
+      query = window.require(REEL_ROOT_QUERY + '.graphql');
+    } catch (e) { /* handled below */ }
+    if (!relay || !query || typeof relay.fetchQuery !== 'function') return false;
+    const had = reelStories.get(id);
+    if (had && had.keep) { try { had.keep.dispose(); } catch (e) { /* ignore */ } }
+    const st = { state: 'busy', at: now(), story: '', keep: null, tries: had ? had.tries || 0 : 0 };
+    reelStories.set(id, st);
+    storyBusy++;
+    const vars = reelRootVars(id);
+    // `early`: part of the answer has arrived; enough if the reel itself is in it.
+    const done = (ok, early) => {
+      if (st.state !== 'busy') return;
+      const src = ok ? source() : null;
+      const video = src && src.get(id);
+      const story = video && deref(src, video.creation_story);
+      if (early && !story) return;
+      storyBusy--;
+      if (story) {
+        st.state = 'ready';
+        st.at = now();
+        st.story = story.__id;
+        storyFails = 0;
+      } else if (ok && src && (src.get('client:root') || {})['video(id:"' + id + '")'] === null && storyDrops < 5) {
+        // Facebook answered that there is no such reel: deleted, or no longer visible to you.
+        // (Capped, so a change on Facebook's side cannot empty the remembered list.)
+        storyDrops++;
+        st.state = 'gone';
+        library.delete(id);
+        toBridge('reelDrop', { id });
+      } else {
+        st.tries++;
+        st.state = st.tries >= 2 ? 'gone' : 'failed';
+        storyFails++;
+        log('reel queue: a remembered reel could not be loaded');
+      }
+      if (st.state !== 'ready' && st.keep) { try { st.keep.dispose(); } catch (e) { /* ignore */ } st.keep = null; }
+      if (isReel) scheduleReelTick(0);
+      if (warmWant) warmReels(warmWant);
+    };
+    try {
+      // Keeps the reel in Facebook's store until it has been put in the list.
+      if (typeof relay.createOperationDescriptor === 'function' && typeof relayEnv.retain === 'function') {
+        st.keep = relayEnv.retain(relay.createOperationDescriptor(query, vars));
+      }
+      relay.fetchQuery(relayEnv, query, vars, { networkCacheConfig: { force: true } })
+        .subscribe({ next: () => done(true, true), complete: () => done(true), error: () => done(false) });
+    } catch (e) {
+      done(false);
+    }
+    setTimeout(() => done(false), 20000);
+    return true;
+  }
+
+  // Load the newest `n` remembered reels before they are needed, so the viewer can start on
+  // one at once. Does nothing until Facebook's reel code is loaded.
+  function warmReels(n) {
+    warmWant = n;
+    let count = 0;
+    for (const id of playlist()) {
+      if (count >= n) break;
+      const st = reelStories.get(id);
+      if (st && st.state === 'gone') continue;
+      count++;
+      if (st && (st.state === 'busy' || storyUsable(st))) continue;
+      if (storyBusy >= RQ_STORY_PARALLEL) return;   // continued when one of those finishes
+      if (storyFails >= 4 || !fetchReelStory(id)) { warmWant = 0; return; }
+    }
+    warmWant = 0;   // all loaded, or on their way
+  }
+
+  const reelCodeLoaded = () => {
+    try { return !!window.require(REEL_ROOT_QUERY + '.graphql'); } catch (e) { return false; }
+  };
+
+  // On the home page Facebook's reel code is not loaded. Facebook loads it when the pointer
+  // goes over a link to Reels, so the page is told exactly that, once, a few seconds in;
+  // the first remembered reels are then loaded and wait for the viewer to be opened.
+  function scheduleWarm() {
+    if (warmTimer || !isHome || !settings.enabled || settings.reelsMode === 'all' || warmTries >= 3) return;
+    warmTimer = setTimeout(warmHome, RQ_WARM_DELAY);
+  }
+  function warmHome() {
+    warmTimer = 0;
+    if (!isHome || !settings.enabled || settings.reelsMode === 'all' || document.hidden) return;   // tried again on returning to the tab
+    if (!playlist().length) return;
+    if (reelCodeLoaded()) { warmTries = 3; warmReels(RQ_WARM); return; }
+    if (++warmTries > 2) return;   // Facebook did not take the hint: the reels load when the viewer opens
+    let link = null;
+    for (const a of document.querySelectorAll('a[href*="/reel/"]')) {
+      let path = '';
+      try { path = new URL(a.href, location.origin).pathname; } catch (e) { /* ignore */ }
+      if (path !== '/reel/' && path !== '/reel') continue;
+      if (!link) link = a;
+      if (a.textContent.trim()) { link = a; break; }   // a link with its name written out shows no tooltip
+    }
+    if (link) {
+      // An icon-only link answers with a tooltip: keep it out of sight for the moment this takes.
+      setFlag('data-ffo-warm', true);
+      setTimeout(() => setFlag('data-ffo-warm', false), 2000);
+      const box = link.getBoundingClientRect();
+      const at = { bubbles: true, cancelable: true, composed: true, view: window, clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 };
+      try {
+        link.dispatchEvent(new PointerEvent('pointerover', Object.assign({ pointerType: 'mouse' }, at)));
+        link.dispatchEvent(new MouseEvent('mouseover', at));
+        setTimeout(() => {
+          link.dispatchEvent(new PointerEvent('pointerout', Object.assign({ pointerType: 'mouse' }, at)));
+          link.dispatchEvent(new MouseEvent('mouseout', at));
+        }, 300);
+      } catch (e) { /* ignore */ }
+    }
+    warmTimer = setTimeout(warmHome, 1200);
+  }
+
+  // Remembered reels, newest first: load the next ones and add those that are ready to the
+  // end of the list, in order. `need` is how many more reels should be waiting.
+  function lineUpRemembered(q, tools, src, infos, need, place) {
+    if (!q.libList) {
+      const here = new Set();
+      for (const info of infos) if (info && info.id) here.add(info.id);
+      q.libList = playlist().filter((id) => !here.has(id));   // the rest is in the list already
+      q.libPos = 0;
+    }
+    const add = [];
+    while (place && add.length < need && q.libPos < q.libList.length) {
+      const id = q.libList[q.libPos];
+      const st = reelStories.get(id);
+      if (st && st.state === 'gone') { q.libPos++; continue; }
+      if (!storyUsable(st)) break;   // in order: wait for this one
+      add.push(id);
+      q.libPos++;
+    }
+    // Load what comes next, a couple at a time.
+    let wanted = need - add.length + 1;
+    const parallel = RQ_STORY_PARALLEL + (need > RQ_AHEAD / 2 ? 1 : 0);
+    for (let i = q.libPos; i < q.libList.length && wanted > 0 && storyBusy < parallel; i++) {
+      const st = reelStories.get(q.libList[i]);
+      if (st && st.state === 'gone') continue;
+      wanted--;
+      if (st && (st.state === 'busy' || storyUsable(st))) continue;
+      if (storyFails >= 4 || !fetchReelStory(q.libList[i])) { q.libDone = true; break; }   // not possible here
+    }
+    if (q.libPos >= q.libList.length) q.libDone = true;
+    if (!add.length) return;
+    try {
+      tools.relay.commitLocalUpdate(relayEnv, (store) => {
+        const conn = store.get(q.conn);
+        if (!conn) return;
+        const edges = (conn.getLinkedRecords('edges') || []).filter(Boolean);
+        const type = edges.length ? edges[0].getType() : 'VideoFeedUnitsEdge';
+        for (const id of add) {
+          const st = reelStories.get(id);
+          const story = st && store.get(st.story);
+          if (!story) continue;
+          const edgeId = RQ_EDGE + id;
+          const edge = store.get(edgeId) || store.create(edgeId, type);
+          edge.setLinkedRecord(story, 'node');
+          edge.setValue(null, 'cursor');
+          if (edges.some((e) => e.getDataID() === edgeId)) continue;
+          edges.push(edge);
+          q.lined++;
+        }
+        conn.setLinkedRecords(edges, 'edges');
+      });
+    } catch (e) {
+      log('reel queue: could not add remembered reels', e);
+      q.libDone = true;
+    }
+  }
+
+  // True while the queue can still put another reel after the one on screen.
+  const rqCanSupply = () => !!rq && rq.on && (!rq.feedDone || !rq.libDone || rq.pageBusy || storyBusy > 0);
+
+  // One look at the list. Returns null when the queue is not in charge (the old skipping
+  // then applies), else { status } for the reel on screen: true = show it, false = it is
+  // unwanted and nothing is ready to take its place yet, null = cannot tell yet.
+  function reelQueueTick() {
+    if (!isReel || reelGiveUp || replay || rqBroken || followingMode() !== true) { if (rq) rq.on = false; return null; }
+    const src = source();
+    const found = src && followingConn(src);
+    if (!found) {
+      // The viewer is still loading: use the time to load the first remembered reels.
+      if (now() - warmAt > 400) { warmAt = now(); warmReels(RQ_RESERVE); }
+      if (rq) rq.on = false;
+      return null;
+    }
+    const tools = rqTools();
+    if (!tools) {
+      // The list is there but Facebook's code for it is not (yet): give it a moment.
+      if (!rqMissingSince) rqMissingSince = now();
+      if (now() - rqMissingSince > 4000) { rqBroken = true; log('reel queue: not available, skipping reels one at a time'); }
+      if (rq) rq.on = false;
+      return null;
+    }
+    rqMissingSince = 0;
+    const conn = found.conn;
+    const refs = conn.edges.__refs;
+    // A new list, or Facebook started this one over (it only ever grows otherwise).
+    if (!rq || rq.conn !== conn.__id || refs.length < rq.len) rq = newQueue(conn.__id);
+    const q = rq;
+    const infos = refs.map((r) => reelEdgeInfo(src, r));
+
+    // Where the viewer is. A reel can be listed more than once; the entry nearest to where
+    // the viewer was last seen is the one on screen.
+    const id = reelId();
+    let cur = -1;
+    if (id) {
+      let best = Infinity;
+      for (let i = 0; i < infos.length; i++) {
+        if (!infos[i] || infos[i].id !== id) continue;
+        const d = Math.abs(i - Math.max(q.cur, 0));
+        if (d < best) { best = d; cur = i; }
+      }
+      if (cur < 0) {
+        // The address is not one of the listed reels (yet), e.g. just after the list changed.
+        if (!q.lostSince) q.lostSince = now();
+        q.on = now() - q.lostSince < 2500;
+        return q.on ? { status: null } : null;
+      }
+    }
+    q.lostSince = 0;
+    q.cur = cur;
+    q.on = true;
+
+    const libOk = new Set(playlist());
+    const verdict = (info) => (info.ours ? (libOk.has(info.id) ? 'show' : 'other') : reelVerdict(info));
+    const keep = [];
+    const have = new Set();   // reels up to and including the one on screen
+    for (let i = 0; i <= cur; i++) {
+      keep.push(refs[i]);
+      if (infos[i] && infos[i].id) have.add(infos[i].id);
+    }
+    const fresh = [];         // good reels from the feed, in feed order
+    const freshIds = new Set();
+    let lined = [];           // remembered reels, in the order they were added
+    for (let i = cur + 1; i < refs.length; i++) {
+      const info = infos[i];
+      if (!info) continue;    // an empty entry
+      const v = verdict(info);
+      if (!info.ours && !q.counted.has(info.ref)) {
+        q.counted.add(info.ref);
+        if (v === 'show') q.dry = 0; else q.dry++;
+        if (!info.ad && info.id && info.owner && isMine(info.owner)) rememberReel(info.id, info.owner.id, '', info.time);
+        if (v === 'hidden') markReelSeen(info.id);
+      }
+      if (v !== 'show') continue;
+      if (info.ours) { lined.push(info); continue; }
+      if (info.id) {
+        if (have.has(info.id) || freshIds.has(info.id)) continue;   // listed twice
+        freshIds.add(info.id);
+      }
+      fresh.push(info.ref);
+    }
+    // A remembered reel the feed now offers as new plays once, as the new one.
+    lined = lined.filter((info) => !freshIds.has(info.id) && !have.has(info.id)).map((info) => info.ref);
+
+    // The reel on screen.
+    let status = null;
+    let stepBack = false;
+    if (cur >= 0 && infos[cur]) {
+      const v = allowedIds.has(id) ? 'show' : verdict(infos[cur]);
+      status = v === 'show';
+      if (!status && (fresh.length || lined.length)) {
+        // Unwanted, and a good one is waiting: take it out and the next one is on screen.
+        keep.pop();
+        if (v === 'hidden') markReelSeen(id);
+        // Reached by scrolling up: the reel now on screen is the one just left, so go one
+        // further back, to the reel that was before the unwanted one.
+        stepBack = lastDir < 0 && keep.length > 0;
+      }
+    }
+
+    const want = keep.concat(fresh, lined);
+    let changed = want.length !== refs.length;
+    for (let i = 0; !changed && i < want.length; i++) changed = want[i] !== refs[i];
+    if (changed && !writeReelList(tools, conn.__id, want)) { rqBroken = true; q.on = false; return null; }
+    q.len = want.length;
+    if (stepBack) {
+      setTimeout(() => {
+        const prev = cardButton(-1);
+        if (prev && prev.getAttribute('aria-disabled') !== 'true') prev.click();
+      }, 0);
+    }
+    // Reels after the one that is, or is about to be, on screen.
+    const swapped = keep.length <= cur;
+    const waiting = fresh.length + lined.length - (swapped || cur < 0 ? 1 : 0);
+    q.atLast = waiting <= 0;
+
+    // More of the feed.
+    const page = deref(src, conn.page_info);
+    if (!q.feedOff && (q.dry >= RQ_DRY_MAX || q.pageFails >= RQ_MAX_FAILS)) {
+      q.feedOff = true;
+      log('reel queue: leaving the feed alone', q.dry, q.pageFails);
+    }
+    // The feed has nothing more. (A list that has only just appeared also says "no more"
+    // for a moment, before its first answer has arrived: that one has no position yet.)
+    q.feedDone = q.feedOff || (!!page && page.has_next_page === false && (!!page.end_cursor || now() - q.since > 4000));
+    // Facebook's own request for the same stretch may be on its way: let it finish first.
+    const fbBusy = !!fbReelPage && !!page && fbReelPage.cursor === page.end_cursor && now() - fbReelPage.at < 4000;
+    if (!q.feedDone && !q.pageBusy && !fbBusy && fresh.length < RQ_AHEAD && page && page.end_cursor &&
+        now() - q.pageAt > (q.pageFails ? 1500 : 250)) {
+      fetchReelPage(tools, found, page.end_cursor);
+    }
+
+    // Remembered reels: all that are needed once the feed is done, a few in reserve before.
+    // On opening the viewer the feed gets a moment to come up with a new reel to start on;
+    // the remembered ones are loaded meanwhile and only go in the list after that.
+    const target = q.feedDone ? RQ_AHEAD : RQ_RESERVE;
+    if (!q.libDone && waiting < target) {
+      const place = q.feedDone || now() - q.since > RQ_GRACE;
+      lineUpRemembered(q, tools, src, infos, target - waiting, place);
+      if (!place) scheduleReelTick(RQ_GRACE - (now() - q.since) + 20);
+    }
+
+    if (cur >= 0 && infos[cur] && infos[cur].ours && q.feedDone && !q.saidCaughtUp) {
+      q.saidCaughtUp = true;
+      toast(friendsOnly() ? 'Replaying reels from your friends, newest first' : 'All caught up - replaying your reels from the newest', 4000);
+    }
+    return { status, swapped };
   }
 
   /* ---- Replay: play the remembered reels, newest first, round and round ---- */
@@ -1646,22 +2255,32 @@
     const path = location.pathname;
     if (path === '/reel/' || path === '/reel') {   // generic "Reels" entry: never the For-you feed
       blockReel(true);
-      // Friends-only goes straight to the remembered friends' reels: paging through the
-      // Following feed to find them would mark everything in it as watched.
-      if (friendsOnly() && startReplay()) return;
+      // Without the queue, friends-only goes straight to the remembered friends' reels:
+      // clicking through the Following feed to find them would mark all of it as watched.
+      if (rqBroken && friendsOnly() && startReplay()) return;
+      if (!rqBroken) warmReels(RQ_RESERVE);
       goFollowing();
       return;
     }
     const id = reelId();
     const mode = followingMode();
-    const status = reelStatus(mode);
+    // In the Following feed the queue decides (see reelQueueTick); elsewhere, and when the
+    // queue cannot work, the reel on screen is judged by itself and unwanted ones are skipped.
+    const queued = mode === true ? reelQueueTick() : null;
+    const status = queued ? queued.status : reelStatus(mode);
     const allowed = status === true || (id != null && allowedIds.has(id));
     watchNextButton();
-    if (status === false && !allowed && friendsOnly() && startReplay()) return;
+    if (status === false && !allowed && !queued && friendsOnly() && startReplay()) return;
 
     if (mode === true) {
       goingTries = 0;
-      if (status === false) { blockReel(true); skipReel(); return; }
+      if (status === false) {
+        blockReel(true);
+        // The queue has put a good reel in its place, or is still finding one.
+        if (queued && (queued.swapped || rqCanSupply())) { skipId = null; scheduleReelTick(250); return; }
+        skipReel();
+        return;
+      }
       if (status === true) { blockReel(false); skipId = null; markShown(id); }
       else {
         // No verdict (e.g. an account that cannot be followed): trust the Following feed
@@ -1711,6 +2330,11 @@
       return;
     }
     if (mode === true && dir > 0) {
+      if (rq && rq.on && rq.atLast && rqCanSupply()) {
+        // Nothing after this one yet; it is being fetched.
+        if (now() - rq.waitToastAt > 4000) { rq.waitToastAt = now(); toast('Loading more reels...', 2000); }
+        scheduleReelTick(0);
+      }
       if (atEnd(false)) {
         ev.preventDefault();
         ev.stopImmediatePropagation();
@@ -1758,6 +2382,7 @@
     if (isHome) { if (!html.hasAttribute('data-ffo-home-init')) { html.setAttribute('data-ffo-home-init', ''); setFlag('data-ffo-strict', true); } }
     else { html.removeAttribute('data-ffo-home-init'); setFlag('data-ffo-strict', false); firstPostAt = 0; }
     if (!isReel) { reelEmpty = false; blockReel(false); }
+    if (isHome) scheduleWarm();
     if (!isHome) stopPull();
     if (!mixWanted()) stopMix();
   }
@@ -1776,12 +2401,14 @@
       followingSticky = false; order = []; cursor = -1; goingAt = 0; goingTries = 0; reelGiveUp = false; unknownSince = 0;
       reelEmpty = false; shownThisPass = 0; lastShownId = null;
       replay = null; pendingResume = null;
+      dropQueue();
       try { sessionStorage.removeItem(REPLAY_KEY); } catch (e) { /* ignore */ }
     }
     if (goChosenFeed()) return;
     updatePage();
     if (isReel) {
-      if (!replay && id && followingMode() === true && noteArrival(id)) { blockReel(true); skipReel(); return; }
+      // (With the queue in charge, repeats are taken out of the list before they are reached.)
+      if (!replay && id && followingMode() === true && noteArrival(id) && !(rq && rq.on)) { blockReel(true); skipReel(); return; }
       reelTick();
     }
     if (isHome) rescanFeed();
@@ -1877,6 +2504,8 @@
     skippedIds.clear();
     replay = null;
     pendingResume = null;
+    dropQueue();
+    rqBroken = false;
     try { sessionStorage.removeItem(REPLAY_KEY); } catch (e) { /* ignore */ }
     if (!syncing) notice('');
     try { sessionStorage.removeItem(EMPTY_KEY); } catch (e) { /* ignore */ }
@@ -2154,5 +2783,5 @@
   }, 1000);
   // Scrolling uses up the posts that were loaded ahead; coming back to the tab resumes loading.
   window.addEventListener('scroll', () => { if (isHome) scheduleAhead(); }, { passive: true, capture: true });
-  document.addEventListener('visibilitychange', () => { if (isHome) { pullPausedUntil = 0; scheduleAhead(0); } });
+  document.addEventListener('visibilitychange', () => { if (isHome) { pullPausedUntil = 0; scheduleAhead(0); scheduleWarm(); } });
 })();

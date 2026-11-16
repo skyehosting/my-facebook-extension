@@ -45,7 +45,7 @@ Facebook's home feed is mostly things you never asked for: ads, "Suggested for y
 - **Cleans your home feed.** Ads, suggested posts, the Reels shelf, "People you may know" and group suggestions are removed before they are drawn, so they never flash on screen.
 - **Fills the page with your people.** The home page is filled from Facebook's own Friends feed and Pages feed, which contain only friends and accounts you follow. You keep the normal home page, with the post box and stories on top.
 - **Keeps posts ready.** A few posts are always loaded below the screen, so scrolling does not stop to wait for Facebook.
-- **Tames reels.** Choose whose reels you see: friends only, friends plus accounts you follow, or everything. When there is nothing new, reels you have already seen from those people replay in a loop, newest first.
+- **Tames reels.** Choose whose reels you see: friends only, friends plus accounts you follow, or everything. Reels you do not want are taken out before you reach them, and about ten good ones are always loaded ahead, so scrolling goes straight from one to the next. When there is nothing new, reels you have already seen from those people follow in the same list, newest first.
 - **Makes unfollowing easy.** Every post's "..." menu gets an **Unfollow** entry (and **Follow again** to undo it). A separate page lists everyone you follow, your friends, and everyone you unfollowed.
 - **Tells you about updates.** It checks this page once a day and shows a small notice on facebook.com when a newer version exists.
 
@@ -110,6 +110,14 @@ Press **Manage** in the popup. The page has three tabs, each with a search box:
 
 Unfollowing here hides the account right away. The unfollow on Facebook itself is carried out by an open Facebook tab when Facebook makes that possible, and each row tells you whether it has happened yet.
 
+### Watching reels
+
+Open **Reels** as usual. New reels from your people come first; after those, the reels you have already seen from them, newest first.
+
+- **Scroll down** for the next reel. It is already loaded.
+- **Scroll up** to go back through what you watched, one reel at a time, in the order you watched it.
+- **At the end** a note says "That was the last reel". Scroll down once more to start over from the newest. Starting over opens a fresh list, so the way back up begins again from there.
+
 ### Friends-only reels
 
 Pick **Friends** under "Reels from", then press **Sync** so the extension knows who your friends are. It opens your friends list in a new tab, reads it there, and tells you when it is done.
@@ -128,6 +136,15 @@ You do not need any of this to use the extension. It is here for the curious.
 - **Nothing jumps:** only the part of the feed that is not on screen yet is changed. Posts you are looking at never move.
 - **No duplicates:** a post is recognised by its permanent id, so it is placed once.
 - **Loading ahead:** while fewer than eight posts are waiting below the screen, the extension keeps the feed loading in the background.
+
+**Reels work the same way.** Facebook's reel viewer plays from a list, and its "Following" list can be mostly reels you do not want (ads, and accounts you unfollowed in My Facebook). The extension edits the part of that list you have not reached yet:
+
+- **Unwanted reels are removed** before the viewer gets to them, so there is nothing to skip past.
+- **About ten good reels are kept waiting.** More of the Following feed is requested in the background until they are.
+- **Remembered reels join the same list.** When the feed has nothing new, reels you already saw from your people are loaded and added after the new ones, so they scroll like any other reel.
+- **What you watched is never touched.** Only the part after the reel on screen is changed, which is why scrolling up always goes back through your history.
+- **A head start from the home page.** A few seconds after facebook.com opens, the newest remembered reels are loaded in the background, so Reels opens on a reel right away.
+- **Reels from accounts you unfollowed are marked as seen** on Facebook. Facebook keeps offering a reel until it is marked, so without this the same unwanted reels would head the list on every visit.
 
 ## Privacy
 

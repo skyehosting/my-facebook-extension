@@ -62,6 +62,12 @@ html[data-ffo-reel-block] div[role="main"] {
   visibility: hidden !important;
 }
 
+/* While Facebook's reel code is being warmed up from the home page (see warmHome),
+   the tooltip that answers the simulated pointer stays out of sight. */
+html[data-ffo-warm] [role="tooltip"] {
+  visibility: hidden !important;
+}
+
 /* "Show what is being hidden" mode from the popup. */
 html[data-ffo-home][data-ffo-debug] div[aria-posinset][data-ffo="hide"] {
   position: relative;
