@@ -92,7 +92,15 @@
 
   const alive = () => { try { return !!chrome.runtime.id; } catch (e) { return false; } };
   const send = (payload) => window.postMessage(Object.assign({ __ffo: 'bridge' }, payload), location.origin);
-  const sendInit = () => send({ settings, connected, friends, reels, unfollowed, pendingFollow, pendingUnfollow });
+  // Settings of Facebook's own "load more posts" request, remembered between page loads
+  // so the home feed can be filled without waiting for that request (see main.js).
+  let feedVars = null;
+  const validFeedVars = (v) => {
+    try {
+      return v && typeof v === 'object' && !Array.isArray(v) && JSON.stringify(v).length < 20000 ? v : null;
+    } catch (e) { return null; }
+  };
+  const sendInit = () => send({ settings, connected, friends, reels, unfollowed, pendingFollow, pendingUnfollow, feedVars });
   const saveReels = () => {
     clearTimeout(reelSaveTimer);
     reelSaveTimer = setTimeout(() => {
@@ -102,7 +110,8 @@
     }, 1000);
   };
 
-  chrome.storage.local.get({ settings: {}, connected: [], friends: null, reels: [], unfollowed: [], pendingFollow: [], pendingUnfollow: [] }, (data) => {
+  chrome.storage.local.get({ settings: {}, connected: [], friends: null, reels: [], unfollowed: [], pendingFollow: [], pendingUnfollow: [], feedVars: null }, (data) => {
+    feedVars = validFeedVars(data.feedVars);
     pendingFollow = validPending(data.pendingFollow);
     pendingUnfollow = validPending(data.pendingUnfollow);
     settings = normalize(data.settings);
@@ -147,6 +156,11 @@
     if (ev.source !== window || !d || d.__ffo !== 'main') return;
     if (d.type === 'hello') { if (loaded) sendInit(); return; }
     if (d.type === 'stats' && d.stats) { stats = d.stats; return; }
+    if (d.type === 'feedVars') {
+      const vars = validFeedVars(d.vars);
+      if (vars && alive()) { feedVars = vars; chrome.storage.local.set({ feedVars: vars }); }
+      return;
+    }
     if (d.type === 'friends') {
       // Result of a friends-list sync on facebook.com/friends/list.
       const ids = validIds(d.ids).slice(0, MAX_FRIENDS);
